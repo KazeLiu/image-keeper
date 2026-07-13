@@ -1,0 +1,32 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "ImageKeeper",
+  "version": "0.1.0",
+  "identifier": "com.imagekeeper.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ImageKeeper - 二次元原图库整理工具",
+        "width": 1400,
+        "height": 900,
+        "resizable": true,
+        "fullscreen": false,
+        "minWidth": 1200,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

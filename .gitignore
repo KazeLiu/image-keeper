@@ -1,0 +1,40 @@
+# 依赖目录
+node_modules/
+target/
+
+# 构建产物
+dist/
+dist-ssr/
+*.local
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Rust
+Cargo.lock
+**/*.rs.bk
+
+# 数据库
+*.db
+*.db-shm
+*.db-wal
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
