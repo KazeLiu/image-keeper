@@ -74,7 +74,7 @@
         <el-table-column prop="group_index" label="组序号" width="90" align="center"/>
         <el-table-column label="预览" width="84" align="center">
           <template #default="{ row }">
-            <el-tooltip placement="right" :show-after="200" popper-class="group-preview-tooltip">
+            <el-tooltip placement="right-start" :show-after="200" popper-class="group-preview-tooltip">
               <template #content>
                 <div class="group-preview-tooltip-content">
                   <img

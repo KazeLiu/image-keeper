@@ -76,7 +76,7 @@
             <div class="category-info">
               <span class="category-title" :style="{ color: category.color }">
                 <span class="category-label">{{ category.label }}</span>
-                <el-tooltip placement="top" effect="dark">
+                <el-tooltip placement="right-start" effect="dark">
                   <template #content>
                     <div class="category-tip">{{ category.description }}</div>
                   </template>

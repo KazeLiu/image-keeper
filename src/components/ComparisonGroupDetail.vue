@@ -14,7 +14,7 @@
               v-model:visible="thresholdPopoverVisible"
               trigger="click"
               placement="bottom-end"
-              :width="380"
+              :width="500"
             >
               <template #reference>
                 <el-button :icon="Setting" plain size="small">
@@ -39,7 +39,7 @@
                     @input="handleOriginalRecognitionInput"
                   />
                   <div class="quality-help">
-                    用来判断大小相近的图片是否都算原图；数值越低，越容易认成同系列原图。
+                    用来判断大小相近的图片是否都算原图；数值越低，越容易把缩略图变成原图。
                   </div>
                 </div>
 
@@ -60,7 +60,7 @@
                     @change="handleQualityThresholdChange"
                   />
                   <div class="quality-help">
-                    只自动勾选系统已判断为疑似低质量的图片；数值越高，勾选越谨慎。
+                    自动根据相似度勾选低质量的图片；
                   </div>
                 </div>
               </div>
@@ -97,23 +97,26 @@
 
       <div v-if="isLoadingCrossCheck" class="cross-check-loading">
         <el-icon class="cross-check-spinner"><Loading /></el-icon>
-        <div class="cross-check-loading-title">正在交叉验证组内图片归属...</div>
+        <div class="cross-check-loading-title">{{ crossCheckProgressTitle }}</div>
         <div v-if="crossCheckProgressText" class="cross-check-current">
           {{ crossCheckProgressText }}
         </div>
         <el-progress
-          v-if="crossCheckProgress && crossCheckProgress.total_pairs > 0"
+          v-if="crossCheckProgress && crossCheckProgressTotal > 0"
           class="cross-check-progress"
           :percentage="crossCheckProgressPercent"
           :stroke-width="8"
           :show-text="false"
         />
         <div v-if="crossCheckProgress" class="cross-check-meta">
-          已完成 {{ crossCheckProgress.processed_pairs }} / {{ crossCheckProgress.total_pairs }}
+          {{ crossCheckProgressMeta }}
+          <span v-if="crossCheckProgress.phase === 'caching' && crossCheckProgress.image_cache_hits > 0">
+            · 图片缓存命中 {{ crossCheckProgress.image_cache_hits }}
+          </span>
           <span v-if="crossCheckProgress.skipped_pairs > 0">
             · 已跳过 {{ crossCheckProgress.skipped_pairs }} 个无意义组合
           </span>
-          <span v-if="crossCheckProgress.cache_hits > 0">
+          <span v-if="crossCheckProgress.phase !== 'caching' && crossCheckProgress.cache_hits > 0">
             · 缓存命中 {{ crossCheckProgress.cache_hits }}
           </span>
         </div>
@@ -170,7 +173,7 @@
                         loading="lazy"
                         @click.stop="openImageViewer(candidate.member.image_id)"
                       />
-                      <el-tooltip :content="getFileName(candidate.member)" placement="top">
+                      <el-tooltip :content="getFileName(candidate.member)" placement="right-start">
                         <el-button
                           class="file-name-button"
                           type="primary"
@@ -186,7 +189,7 @@
 
                 <el-table-column label="判断" width="150" align="center">
                   <template #default="{ row: candidate }">
-                    <el-tooltip :content="candidate.reason" placement="top">
+                    <el-tooltip :content="candidate.reason" placement="right-start">
                       <el-tag
                         :type="candidate.shouldDelete ? 'danger' : 'info'"
                         size="small"
@@ -261,7 +264,7 @@
                       loading="lazy"
                       @click.stop="openImageViewer(row.member.image_id)"
                     />
-              <el-tooltip :content="getFileName(row.member)" placement="top">
+              <el-tooltip :content="getFileName(row.member)" placement="right-start">
                 <el-button
                   class="file-name-button"
                   type="primary"
@@ -277,7 +280,7 @@
 
         <el-table-column label="原图依据" width="150" align="center">
           <template #default="{ row }">
-            <el-tooltip :content="row.reason" placement="top">
+            <el-tooltip :content="row.reason" placement="right-start">
               <el-tag :type="row.source === 'manual' ? 'primary' : 'success'" size="small" effect="light">
                 {{ row.source === 'manual' ? '手动原图' : '识别为原图' }}
               </el-tag>
@@ -384,6 +387,7 @@ import type { ComparisonGroupMember, GroupSimilarityProgress, GroupSimilaritySco
 
 const store = useComparisonStore()
 const ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
+const GROUP_SCORE_CACHE_LIMIT = 30
 
 type OriginalRowSource = 'auto' | 'manual' | 'fallback'
 
@@ -413,6 +417,7 @@ const originalRecognitionPercent = ref(readStoredOriginalRecognitionPercent())
 const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
 const groupSimilarityScores = ref<GroupSimilarityScore[]>([])
+const groupSimilarityScoreCache = new Map<string, GroupSimilarityScore[]>()
 const crossCheckProgress = ref<GroupSimilarityProgress | null>(null)
 const isLoadingCrossCheck = ref(false)
 const hasManualAssignmentChanges = ref(false)
@@ -445,21 +450,54 @@ const groupKey = computed(() =>
 
 const originalRows = computed(() => buildOriginalRows(group.value?.members || []))
 
+const crossCheckProgressTotal = computed(() => {
+  if (!crossCheckProgress.value) return 0
+  if (crossCheckProgress.value.phase === 'caching') return crossCheckProgress.value.total_images
+  return crossCheckProgress.value.total_pairs
+})
+
+const crossCheckProgressDone = computed(() => {
+  if (!crossCheckProgress.value) return 0
+  if (crossCheckProgress.value.phase === 'caching') return crossCheckProgress.value.processed_images
+  return crossCheckProgress.value.processed_pairs
+})
+
 const crossCheckProgressPercent = computed(() => {
-  if (!crossCheckProgress.value || crossCheckProgress.value.total_pairs <= 0) return 0
+  if (!crossCheckProgress.value || crossCheckProgressTotal.value <= 0) return 0
   return Math.min(
     100,
-    Math.round((crossCheckProgress.value.processed_pairs / crossCheckProgress.value.total_pairs) * 100)
+    Math.round((crossCheckProgressDone.value / crossCheckProgressTotal.value) * 100)
   )
+})
+
+const crossCheckProgressTitle = computed(() => {
+  const phase = crossCheckProgress.value?.phase
+  if (phase === 'caching') return '正在建立图片缓存...'
+  if (phase === 'comparing') return '正在交叉验证组内图片归属...'
+  if (phase === 'completed') return '正在整理结果...'
+  return '正在准备组内比对...'
 })
 
 const crossCheckProgressText = computed(() => {
   const progress = crossCheckProgress.value
   if (!progress) return ''
+  if (progress.phase === 'caching') {
+    const imageName = progress.current_image_file_name
+    return imageName ? `正在处理图片：${imageName}` : '正在准备图片缓存...'
+  }
   const leftName = progress.current_left_file_name
   const rightName = progress.current_right_file_name
   if (!leftName || !rightName) return '正在准备组内比对...'
   return `正在比对：${leftName} ↔ ${rightName}`
+})
+
+const crossCheckProgressMeta = computed(() => {
+  const progress = crossCheckProgress.value
+  if (!progress) return ''
+  if (progress.phase === 'caching') {
+    return `图片缓存 ${progress.processed_images} / ${progress.total_images}`
+  }
+  return `比对进度 ${progress.processed_pairs} / ${progress.total_pairs}`
 })
 
 const similarityScoreMap = computed(() => {
@@ -737,7 +775,17 @@ async function loadGroupCrossCheckScores() {
   groupSimilarityScores.value = []
   crossCheckProgress.value = null
 
-  if (!currentGroup || !store.currentRunId || currentGroup.members.length < 2) return
+  if (!currentGroup || !store.currentRunId || currentGroup.members.length < 2) {
+    isLoadingCrossCheck.value = false
+    return
+  }
+  const scoreCacheKey = getGroupScoreCacheKey(store.currentRunId, currentGroup.members)
+  const cachedScores = groupSimilarityScoreCache.get(scoreCacheKey)
+  if (cachedScores) {
+    groupSimilarityScores.value = cachedScores
+    isLoadingCrossCheck.value = false
+    return
+  }
 
   isLoadingCrossCheck.value = true
   try {
@@ -749,6 +797,7 @@ async function loadGroupCrossCheckScores() {
     )
     if (requestId === crossCheckRequestId) {
       groupSimilarityScores.value = scores
+      rememberGroupSimilarityScores(scoreCacheKey, scores)
     }
   } catch (error) {
     if (requestId === crossCheckRequestId) {
@@ -759,6 +808,33 @@ async function loadGroupCrossCheckScores() {
     if (requestId === crossCheckRequestId) {
       isLoadingCrossCheck.value = false
     }
+  }
+}
+
+function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[]) {
+  const memberKeys = members
+    .map((member) => [
+      member.image_id,
+      member.file_path,
+      member.file_size,
+      member.width,
+      member.height,
+      member.phash || ''
+    ].join('|'))
+    .sort()
+    .join(';')
+  return `${runId}:${memberKeys}`
+}
+
+function rememberGroupSimilarityScores(cacheKey: string, scores: GroupSimilarityScore[]) {
+  if (groupSimilarityScoreCache.has(cacheKey)) {
+    groupSimilarityScoreCache.delete(cacheKey)
+  }
+  groupSimilarityScoreCache.set(cacheKey, scores)
+  while (groupSimilarityScoreCache.size > GROUP_SCORE_CACHE_LIMIT) {
+    const oldestKey = groupSimilarityScoreCache.keys().next().value
+    if (!oldestKey) break
+    groupSimilarityScoreCache.delete(oldestKey)
   }
 }
 

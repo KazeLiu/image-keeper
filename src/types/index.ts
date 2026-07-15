@@ -340,13 +340,19 @@ export interface GroupSimilarityScore {
 export interface GroupSimilarityProgress {
   request_id: string
   status: 'started' | 'running' | 'completed'
+  phase: 'planning' | 'caching' | 'comparing' | 'completed'
   total_pairs: number
   processed_pairs: number
+  total_images: number
+  processed_images: number
   current_left_image_id?: number | null
   current_right_image_id?: number | null
   current_left_file_name?: string | null
   current_right_file_name?: string | null
+  current_image_id?: number | null
+  current_image_file_name?: string | null
   cache_hits: number
+  image_cache_hits: number
   computed_pairs: number
   skipped_pairs: number
 }

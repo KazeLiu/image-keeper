@@ -55,7 +55,7 @@
               </span>
             </button>
 
-            <el-tooltip content="删除历史任务" placement="top">
+            <el-tooltip content="删除历史任务" placement="right-start">
               <el-button
                 :icon="Delete"
                 type="danger"
@@ -78,7 +78,7 @@
       :style="{ width: `${asidePanelWidth}px` }"
     >
       <div v-if="isStatsPanelCollapsed" class="aside-collapsed">
-        <el-tooltip content="展开左栏" placement="right">
+        <el-tooltip content="展开左栏" placement="right-start">
           <el-button
             :icon="Expand"
             circle
@@ -143,11 +143,14 @@ const MIN_LEFT_WIDTH = 320
 const MIN_CENTER_WIDTH = 460
 const MIN_RIGHT_WIDTH = 420
 const COLLAPSED_LEFT_WIDTH = 52
+const DEFAULT_LEFT_RATIO = 0.22
+const DEFAULT_RIGHT_RATIO = 0.52
 const LAYOUT_STORAGE_KEY = 'imagekeeper:workspace-column-ratios'
 const STATS_PANEL_COLLAPSED_STORAGE_KEY = 'imagekeeper:workspace-stats-panel-collapsed'
 
 const leftWidth = ref(400)
 const rightWidth = ref(560)
+const layoutRatios = ref({ leftRatio: DEFAULT_LEFT_RATIO, rightRatio: DEFAULT_RIGHT_RATIO })
 const comparisonStore = useComparisonStore()
 const activeScreen = ref<'home' | 'history' | 'workspace'>('home')
 const isHistoryRunView = ref(false)
@@ -170,30 +173,33 @@ const asidePanelWidth = computed(() =>
 )
 
 function clampLayout(nextLeftWidth: number, nextRightWidth: number) {
-  const viewportWidth = window.innerWidth
-  const handleWidth = isStatsPanelCollapsed.value ? 6 : 12
-  const availableWidth = viewportWidth - handleWidth
-  const layoutLeftWidth = isStatsPanelCollapsed.value ? COLLAPSED_LEFT_WIDTH : nextLeftWidth
-  const maxCombinedSideWidth = Math.max(
-    (isStatsPanelCollapsed.value ? COLLAPSED_LEFT_WIDTH : MIN_LEFT_WIDTH) + MIN_RIGHT_WIDTH,
-    availableWidth - MIN_CENTER_WIDTH
-  )
-
+  const availableWidth = getWorkspaceAvailableWidth()
   let clampedLeft = Math.max(MIN_LEFT_WIDTH, nextLeftWidth)
   let clampedRight = Math.max(MIN_RIGHT_WIDTH, nextRightWidth)
+  const displayedLeftWidth = () =>
+    isStatsPanelCollapsed.value ? COLLAPSED_LEFT_WIDTH : clampedLeft
 
-  const combinedSideWidth = layoutLeftWidth + clampedRight
-  if (combinedSideWidth > maxCombinedSideWidth) {
-    const overflow = combinedSideWidth - maxCombinedSideWidth
-    if (activeResize === 'left') {
-      clampedLeft = Math.max(MIN_LEFT_WIDTH, clampedLeft - overflow)
-    } else if (activeResize === 'right') {
-      clampedRight = Math.max(MIN_RIGHT_WIDTH, clampedRight - overflow)
-    } else {
-      const rightReduction = Math.min(overflow, clampedRight - MIN_RIGHT_WIDTH)
-      clampedRight -= rightReduction
-      clampedLeft = Math.max(MIN_LEFT_WIDTH, clampedLeft - (overflow - rightReduction))
+  let centerWidth = availableWidth - displayedLeftWidth() - clampedRight
+  if (centerWidth < MIN_CENTER_WIDTH) {
+    let shortage = MIN_CENTER_WIDTH - centerWidth
+
+    if (!isStatsPanelCollapsed.value) {
+      const leftReduction = Math.min(shortage, clampedLeft - MIN_LEFT_WIDTH)
+      clampedLeft -= leftReduction
+      shortage -= leftReduction
     }
+
+    if (shortage > 0) {
+      const rightReduction = Math.min(shortage, clampedRight - MIN_RIGHT_WIDTH)
+      clampedRight -= rightReduction
+    }
+  }
+
+  centerWidth = availableWidth - displayedLeftWidth() - clampedRight
+  if (centerWidth > clampedRight && centerWidth > MIN_CENTER_WIDTH) {
+    const transferableWidth = centerWidth - MIN_CENTER_WIDTH
+    const neededToMakeRightLargest = (centerWidth - clampedRight) / 2
+    clampedRight += Math.max(0, Math.min(transferableWidth, neededToMakeRightLargest))
   }
 
   leftWidth.value = clampedLeft
@@ -227,11 +233,12 @@ function stopResize() {
   document.body.classList.remove('is-resizing-columns')
   window.removeEventListener('mousemove', handleResize)
   window.removeEventListener('mouseup', stopResize)
+  rememberCurrentLayoutRatios()
   saveLayoutRatios()
 }
 
 function handleWindowResize() {
-  clampLayout(leftWidth.value, rightWidth.value)
+  applyStoredLayoutRatios()
 }
 
 function setStatsPanelCollapsed(collapsed: boolean) {
@@ -299,33 +306,62 @@ function backToEntry() {
 function restoreLayoutRatios() {
   try {
     const rawValue = window.localStorage.getItem(LAYOUT_STORAGE_KEY)
-    if (!rawValue) return
+    if (!rawValue) {
+      applyStoredLayoutRatios()
+      return
+    }
 
     const parsed = JSON.parse(rawValue) as { leftRatio?: number; rightRatio?: number }
     const leftRatio = normalizeRatio(parsed.leftRatio)
     const rightRatio = normalizeRatio(parsed.rightRatio)
-    if (leftRatio === null || rightRatio === null) return
+    if (leftRatio === null || rightRatio === null) {
+      applyStoredLayoutRatios()
+      return
+    }
 
-    clampLayout(window.innerWidth * leftRatio, window.innerWidth * rightRatio)
+    layoutRatios.value = { leftRatio, rightRatio }
+    applyStoredLayoutRatios()
   } catch (error) {
     console.warn('恢复工作台栏宽失败:', error)
+    applyStoredLayoutRatios()
   }
 }
 
 function saveLayoutRatios() {
   try {
-    const viewportWidth = window.innerWidth
-    if (viewportWidth <= 0) return
-
     window.localStorage.setItem(
       LAYOUT_STORAGE_KEY,
-      JSON.stringify({
-        leftRatio: leftWidth.value / viewportWidth,
-        rightRatio: rightWidth.value / viewportWidth
-      })
+      JSON.stringify(layoutRatios.value)
     )
   } catch (error) {
     console.warn('保存工作台栏宽失败:', error)
+  }
+}
+
+function getWorkspaceAvailableWidth() {
+  const handleWidth = isStatsPanelCollapsed.value ? 6 : 12
+  return Math.max(0, window.innerWidth - handleWidth)
+}
+
+function applyStoredLayoutRatios() {
+  const availableWidth = getWorkspaceAvailableWidth()
+  if (availableWidth <= 0) return
+
+  clampLayout(
+    availableWidth * layoutRatios.value.leftRatio,
+    availableWidth * layoutRatios.value.rightRatio
+  )
+}
+
+function rememberCurrentLayoutRatios() {
+  const availableWidth = getWorkspaceAvailableWidth()
+  if (availableWidth <= 0) return
+
+  layoutRatios.value = {
+    leftRatio: isStatsPanelCollapsed.value
+      ? layoutRatios.value.leftRatio
+      : normalizeRatio(leftWidth.value / availableWidth) ?? DEFAULT_LEFT_RATIO,
+    rightRatio: normalizeRatio(rightWidth.value / availableWidth) ?? DEFAULT_RIGHT_RATIO
   }
 }
 
@@ -351,7 +387,7 @@ function saveStatsPanelCollapsed() {
 
 function normalizeRatio(value: unknown) {
   if (typeof value !== 'number' || Number.isNaN(value)) return null
-  return Math.min(0.8, Math.max(0.05, value))
+  return Math.min(0.75, Math.max(0.05, value))
 }
 
 function statusLabel(status: RunStatus) {

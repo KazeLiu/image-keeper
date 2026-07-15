@@ -36,7 +36,7 @@
               <el-tag class="alias-tag" :type="$index === 0 ? 'primary' : 'info'">
                 {{ row.alias }}
               </el-tag>
-              <el-tooltip :content="row.name" placement="top" :show-after="300">
+              <el-tooltip :content="row.name" placement="right-start" :show-after="300">
                 <span class="folder-name">{{ row.name }}</span>
               </el-tooltip>
             </div>
@@ -45,7 +45,7 @@
 
         <el-table-column prop="path" label="路径" min-width="100">
           <template #default="{ row }">
-            <el-tooltip :content="row.path" placement="top" :show-after="300">
+            <el-tooltip :content="row.path" placement="right-start" :show-after="300">
               <button class="path-button" type="button" @click="openDirectory(row.path)">
                 {{ formatMiddlePath(row.path) }}
               </button>
