@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.4 seconds
-Output:
 # Difference Image Finder Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -468,5 +465,3 @@ git commit -m "docs: explain difference finder workflow"
 - Spec coverage: entry/window, multi-reference scanning, direct-match aggregation, result filtering, drag order, simple and capture templates, detailed examples, quick rename, collision handling, rename/move/copy, cancellation, and undo all map to tasks above.
 - Placeholder scan: no `TBD`, `TODO`, incomplete code-body comments, or deferred implementation instructions remain.
 - Type consistency: Rust command/type names use snake_case commands and camelCase serde payloads; frontend wrappers use the same request/result names.
-
-
