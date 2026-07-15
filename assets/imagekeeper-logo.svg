@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">ImageKeeper Logo</title>
+  <desc id="description">Two layered image cards protected by a shield and check mark</desc>
+  <defs>
+    <linearGradient id="background" x1="132" y1="108" x2="894" y2="916" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#312E81"/>
+      <stop offset="0.52" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#0891B2"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="330" y1="448" x2="710" y2="690" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#06B6D4"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="32" stdDeviation="34" flood-color="#111827" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#background)"/>
+  <path d="M176 222C290 102 480 80 650 120" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" opacity="0.16"/>
+  <g transform="rotate(-7 476 410)" opacity="0.72">
+    <rect x="178" y="198" width="596" height="424" rx="84" fill="#CFFAFE" stroke="#FFFFFF" stroke-width="24"/>
+    <circle cx="304" cy="320" r="46" fill="#22D3EE"/>
+    <path d="M226 548L358 408L452 500L542 392L724 548Z" fill="#818CF8"/>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="238" y="302" width="548" height="438" rx="92" fill="#F8FAFC"/>
+    <circle cx="362" cy="420" r="48" fill="#22D3EE"/>
+    <path d="M294 660L418 524L508 608L596 492L730 660Z" fill="url(#accent)"/>
+  </g>
+  <g filter="url(#shadow)">
+    <path d="M678 482C730 518 778 530 824 534V650C824 746 766 817 678 858C590 817 532 746 532 650V534C578 530 626 518 678 482Z" fill="#312E81" stroke="#CFFAFE" stroke-width="18" stroke-linejoin="round"/>
+    <path d="M608 664L654 710L752 604" fill="none" stroke="#F8FAFC" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
