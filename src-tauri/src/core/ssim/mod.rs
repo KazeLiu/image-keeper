@@ -1,5 +1,6 @@
 pub mod compute;
 pub mod resize;
+pub mod standard;
 
 use crate::db::repository::Repository;
 use crate::error::Result;
