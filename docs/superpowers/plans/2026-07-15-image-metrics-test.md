@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在首页加入无持久化的多图指标测试弹窗，自动计算相对底图的 pHash 距离和当前低精度相似度，并按单卡片请求计算标准窗口式 SSIM。
+**Goal:** 在首页两张主任务卡片下加入紧凑入口，打开无持久化的独立图片指标测试窗口，自动计算相对底图的 pHash 距离和当前低精度相似度，并按单卡片请求计算标准窗口式 SSIM。
 
-**Architecture:** Rust 新增无数据库依赖的 `image_metrics` Tauri 命令层，并把标准 SSIM 放在可被正式工作流复用的核心模块；前端新增独立 API、会话状态模块和 Element Plus 弹窗组件，不进入正式对比 Pinia store。大图只在后端生成最长边 500px 的 PNG 缩略图，原图只交给 `el-image` 预览；所有异步结果通过会话代次和底图路径校验，关闭时释放内存状态。
+**Architecture:** Rust 新增无数据库依赖的 `image_metrics` Tauri 命令层，并把标准 SSIM 放在可被正式工作流复用的核心模块；前端新增独立 API、会话状态和 `/image-metrics-test` 路由视图，不进入正式对比 Pinia store。主窗口用固定 label 创建或聚焦 Tauri WebviewWindow；测试窗口拦截系统关闭请求。大图只在后端生成最长边 500px 的 PNG 缩略图，原图只交给 `el-image` 预览。
 
 **Tech Stack:** Vue 3、TypeScript、Element Plus、Vitest、Vue Test Utils、Tauri 2、Rust 2021、`image`、`fast_image_resize`、64 位 pHash。
 
@@ -21,9 +21,12 @@
 - Create `src/api/imageMetrics.ts`：测试工具专用 Tauri API 和返回类型。
 - Create `src/features/imageMetrics/session.ts`：可独立测试的导入、底图、队列、过期结果和关闭判断状态。
 - Create `src/features/imageMetrics/session.spec.ts`：状态行为测试。
-- Create `src/components/ImageMetricsTestDialog.vue`：弹窗、拖拽、图库卡片、原图预览和关闭确认。
-- Create `src/components/ImageMetricsTestDialog.spec.ts`：关键弹窗交互测试。
-- Modify `src/views/MainView.vue`：首页第三张入口卡片并挂载弹窗。
+- Create `src/views/ImageMetricsTestView.vue`：独立窗口页面、拖拽、图库卡片、原图预览和关闭确认。
+- Create `src/views/ImageMetricsTestView.spec.ts`：关键窗口交互测试。
+- Modify `src/router/index.ts`：增加独立窗口专用路由。
+- Create `src/features/imageMetrics/window.ts`：创建、查找、显示和聚焦固定 label 的 WebviewWindow。
+- Create `src/features/imageMetrics/window.spec.ts`：单实例窗口行为测试。
+- Modify `src/views/MainView.vue`：在两张主卡片下加入紧凑入口并调用窗口服务。
 
 另一个对话当前正在修改 `src-tauri/src/commands/comparison.rs`、`src/api/comparison.ts` 和 `src/components/ComparisonGroupDetail.vue`。本计划不修改这三个文件。若其标准 SSIM 核心在执行前已提交，Task 2 先比较接口并直接复用，不创建重复算法。
 
@@ -947,20 +950,21 @@ git add src/api/imageMetrics.ts src/features/imageMetrics/session.ts src/feature
 git commit -m "feat: add transient image metrics session"
 ```
 
-### Task 5: 用 TDD 实现弹窗交互
+### Task 5: 用 TDD 实现独立窗口页面与关闭拦截
 
 **Files:**
-- Create: `src/components/ImageMetricsTestDialog.vue`
-- Create: `src/components/ImageMetricsTestDialog.spec.ts`
+- Create: `src/views/ImageMetricsTestView.vue`
+- Create: `src/views/ImageMetricsTestView.spec.ts`
+- Modify: `src/router/index.ts`
 
 - [ ] **Step 1: 写关闭确认和高精度按需的失败组件测试**
 
-`ImageMetricsTestDialog.spec.ts` 使用 `vi.mock('@/api/imageMetrics')` 返回两张固定图片，并 shallow mount Element Plus 子组件。测试至少包含：
+`ImageMetricsTestView.spec.ts` 使用 `vi.mock('@/api/imageMetrics')` 返回两张固定图片，并 mock 当前 Tauri 窗口。测试至少包含：
 
 ```ts
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import ImageMetricsTestDialog from './ImageMetricsTestDialog.vue'
+import ImageMetricsTestView from './ImageMetricsTestView.vue'
 import { ElMessageBox } from 'element-plus'
 
 vi.mock('@/api/imageMetrics', () => ({
@@ -973,32 +977,38 @@ vi.mock('@/api/imageMetrics', () => ({
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => `asset://${path}` }))
+const closeWindow = vi.fn(async () => undefined)
+const onCloseRequested = vi.fn(async () => () => undefined)
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ onDragDropEvent: vi.fn(async () => () => undefined) })
+  getCurrentWindow: () => ({
+    close: closeWindow,
+    onCloseRequested,
+    onDragDropEvent: vi.fn(async () => () => undefined)
+  })
 }))
 
-describe('ImageMetricsTestDialog', () => {
+describe('ImageMetricsTestView', () => {
   beforeEach(() => vi.restoreAllMocks())
 
-  it('closes an empty dialog without confirmation', async () => {
+  it('closes an empty window without confirmation', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm')
-    const wrapper = mount(ImageMetricsTestDialog, { props: { modelValue: true } })
-    await wrapper.get('[data-test="close-dialog"]').trigger('click')
+    const wrapper = mount(ImageMetricsTestView)
+    await wrapper.get('[data-test="close-window"]').trigger('click')
     expect(confirm).not.toHaveBeenCalled()
-    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([false])
+    expect(closeWindow).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps a non-empty dialog when discard confirmation is canceled', async () => {
+  it('keeps a non-empty window when discard confirmation is canceled', async () => {
     vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
-    const wrapper = mount(ImageMetricsTestDialog, { props: { modelValue: true } })
+    const wrapper = mount(ImageMetricsTestView)
     await wrapper.vm.addImagePathsForTest(['a'])
-    await wrapper.get('[data-test="close-dialog"]').trigger('click')
-    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    await wrapper.get('[data-test="close-window"]').trigger('click')
+    expect(closeWindow).not.toHaveBeenCalled()
   })
 
   it('computes standard ssim only after the card action is clicked', async () => {
     const api = await import('@/api/imageMetrics')
-    const wrapper = mount(ImageMetricsTestDialog, { props: { modelValue: true } })
+    const wrapper = mount(ImageMetricsTestView)
     await wrapper.vm.addImagePathsForTest(['base', 'candidate'])
     await wrapper.get('[data-test="card-base"]').trigger('click')
     await flushPromises()
@@ -1017,18 +1027,17 @@ describe('ImageMetricsTestDialog', () => {
 Run:
 
 ```powershell
-npm test -- --run src/components/ImageMetricsTestDialog.spec.ts
+npm test -- --run src/views/ImageMetricsTestView.spec.ts
 ```
 
-Expected: FAIL，组件不存在。
+Expected: FAIL，独立窗口视图不存在。
 
-- [ ] **Step 3: 实现弹窗结构和逻辑**
+- [ ] **Step 3: 实现窗口页面、系统关闭拦截和路由**
 
-组件必须使用 `el-dialog` 的 `before-close`，顶部包含四条指标说明，操作栏包含选择图片、清空全部、数量和拖拽提示。逻辑骨架如下：
+视图顶部包含窗口标题与关闭按钮、四条指标说明，操作栏包含选择图片、清空全部、数量和拖拽提示。它使用当前 Tauri 窗口并拦截系统标题栏关闭请求：
 
 ```ts
-const props = defineProps<{ modelValue: boolean }>()
-const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
+const appWindow = getCurrentWindow()
 const session = createImageMetricsSession({
   loadImage: loadTestImage,
   computeLow: computeTestLowPrecision,
@@ -1056,12 +1065,34 @@ async function confirmDiscard() {
   }
 }
 
-async function closeDialog(done?: () => void) {
+let allowNativeClose = false
+
+async function closeWindow() {
   if (!await confirmDiscard()) return
   session.reset()
-  if (done) done()
-  else emit('update:modelValue', false)
+  allowNativeClose = true
+  await appWindow.close()
 }
+
+let unlistenClose: (() => void) | undefined
+let unlistenDrop: (() => void) | undefined
+
+onMounted(async () => {
+  unlistenClose = await appWindow.onCloseRequested(async (event) => {
+    if (allowNativeClose) return
+    event.preventDefault()
+    await closeWindow()
+  })
+  unlistenDrop = await appWindow.onDragDropEvent(async (event) => {
+    if (event.payload.type === 'drop') await session.addPaths(event.payload.paths)
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenClose?.()
+  unlistenDrop?.()
+  session.reset()
+})
 ```
 
 模板的每张卡片必须满足：图片区域 `@click.stop`，卡片自身支持 click、Enter 和 Space 设底图；底图显示文字标签；非底图显示 `pHash 距离`、`低精度`、`高精度` 三行；pHash 距离 tooltip 同时显示底图和当前图片的完整 pHash；高精度行的按钮调用 `session.computeHighPrecision(item.path)`；移除按钮 `@click.stop`。`el-image` 使用缩略图作为 `src`，原图 `previewUrls` 作为 `preview-src-list`，设置 `preview-teleported`。
@@ -1069,7 +1100,7 @@ async function closeDialog(done?: () => void) {
 样式固定使用：
 
 ```scss
-.metrics-dialog-body { height: 78vh; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+.metrics-window { height: 100vh; min-height: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; background: #f5f7fa; }
 .metrics-grid { min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; align-content: start; }
 .metrics-card { border: 1px solid #dcdfe6; border-radius: 8px; background: #fff; overflow: hidden; cursor: pointer; }
 .metrics-card.is-baseline { border: 2px solid #409eff; background: #ecf5ff; }
@@ -1077,42 +1108,47 @@ async function closeDialog(done?: () => void) {
 .metric-value { font-variant-numeric: tabular-nums; }
 ```
 
-在 `onMounted` 订阅 `getCurrentWindow().onDragDropEvent`，只处理 `event.payload.type === 'drop'` 的 paths；`onBeforeUnmount` 调用 unlisten 并使会话 reset。若高精度繁忙时点击另一张卡片，显示 `ElMessage.info('请等待当前高精度计算完成')`。
+路由表增加 `/image-metrics-test`，懒加载 `ImageMetricsTestView.vue`。若高精度繁忙时点击另一张卡片，显示 `ElMessage.info('请等待当前高精度计算完成')`。
 
 - [ ] **Step 4: 验证组件测试、全量前端测试与构建**
 
 Run:
 
 ```powershell
-npm test -- --run src/components/ImageMetricsTestDialog.spec.ts
+npm test -- --run src/views/ImageMetricsTestView.spec.ts
 npm test
 npm run build
 ```
 
 Expected: 组件测试和全部前端测试通过，构建成功。
 
-- [ ] **Step 5: 提交弹窗**
+- [ ] **Step 5: 提交独立窗口页面**
 
 ```powershell
-git add src/components/ImageMetricsTestDialog.vue src/components/ImageMetricsTestDialog.spec.ts
-git commit -m "feat: add image metrics test dialog"
+git add src/views/ImageMetricsTestView.vue src/views/ImageMetricsTestView.spec.ts src/router/index.ts
+git commit -m "feat: add image metrics test window view"
 ```
 
 ### Task 6: 接入首页并完成回归验证
 
 **Files:**
+- Create: `src/features/imageMetrics/window.ts`
+- Create: `src/features/imageMetrics/window.spec.ts`
 - Modify: `src/views/MainView.vue`
 - Create: `src/views/MainView.spec.ts`
 - Modify: `README.md`
 
 - [ ] **Step 1: 先写首页入口失败测试**
 
-创建或扩展 `src/views/MainView.spec.ts`，stub 现有工作台子组件和 Pinia，断言首页渲染“图片指标测试”，点击后出现弹窗组件：
+先创建 `window.spec.ts`，mock `WebviewWindow.getByLabel` 与构造器，断言不存在时创建固定 label，已存在时只 show、unminimize、setFocus。再创建 `MainView.spec.ts`，stub 现有工作台子组件和 Pinia，断言紧凑入口位于两张主任务卡片下方，点击后调用窗口服务：
 
 ```ts
 import { createPinia } from 'pinia'
+import { openImageMetricsWindow } from '@/features/imageMetrics/window'
 
-it('opens the transient image metrics dialog from the third home card', async () => {
+vi.mock('@/features/imageMetrics/window', () => ({ openImageMetricsWindow: vi.fn() }))
+
+it('opens the independent metrics window from a compact card below the main cards', async () => {
   const wrapper = mount(MainView, {
     global: {
       plugins: [createPinia()],
@@ -1120,14 +1156,14 @@ it('opens the transient image metrics dialog from the third home card', async ()
         ComparisonDirectorySelector: true,
         ComparisonProgress: true,
         ComparisonResults: true,
-        ComparisonGroupDetail: true,
-        ImageMetricsTestDialog: { props: ['modelValue'], template: '<div data-test="metrics-dialog-stub" />' }
+        ComparisonGroupDetail: true
       }
     }
   })
-  expect(wrapper.findAll('.task-card')).toHaveLength(3)
+  expect(wrapper.findAll('.task-cards .task-card')).toHaveLength(2)
+  expect(wrapper.get('[data-test="open-image-metrics"]').classes()).toContain('compact-task-card')
   await wrapper.get('[data-test="open-image-metrics"]').trigger('click')
-  expect(wrapper.findComponent(ImageMetricsTestDialog).props('modelValue')).toBe(true)
+  expect(openImageMetricsWindow).toHaveBeenCalledTimes(1)
 })
 ```
 
@@ -1141,18 +1177,46 @@ Run:
 npm test -- --run src/views/MainView.spec.ts
 ```
 
-Expected: FAIL，首页只有两张任务卡片且没有弹窗组件。
+Expected: FAIL，窗口服务与紧凑入口不存在。
 
-- [ ] **Step 3: 添加第三张卡片和弹窗挂载**
+- [ ] **Step 3: 实现单实例窗口服务和首页紧凑入口**
 
-在首页任务卡片容器内增加：
+创建 `src/features/imageMetrics/window.ts`：
+
+```ts
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+
+const LABEL = 'image-metrics-test'
+
+export async function openImageMetricsWindow() {
+  const existing = await WebviewWindow.getByLabel(LABEL)
+  if (existing) {
+    await existing.show()
+    await existing.unminimize()
+    await existing.setFocus()
+    return existing
+  }
+  return new WebviewWindow(LABEL, {
+    url: '/image-metrics-test',
+    title: 'ImageKeeper - 图片指标测试',
+    width: 1180,
+    height: 820,
+    minWidth: 840,
+    minHeight: 600,
+    resizable: true,
+    center: true
+  })
+}
+```
+
+在 `.task-cards` 结束标签之后增加：
 
 ```vue
 <button
   type="button"
-  class="task-card"
+  class="compact-task-card"
   data-test="open-image-metrics"
-  @click="imageMetricsDialogVisible = true"
+  @click="openMetricsTest"
 >
   <span class="task-icon"><el-icon><DataAnalysis /></el-icon></span>
   <span class="task-title">图片指标测试</span>
@@ -1160,13 +1224,7 @@ Expected: FAIL，首页只有两张任务卡片且没有弹窗组件。
 </button>
 ```
 
-在入口视图同级挂载：
-
-```vue
-<ImageMetricsTestDialog v-model="imageMetricsDialogVisible" />
-```
-
-脚本引入 `DataAnalysis`、`ImageMetricsTestDialog` 并新增 `const imageMetricsDialogVisible = ref(false)`。桌面端 `.task-cards` 保持三列；在窄于约 `980px` 时改为两列，在现有 `760px` 断点改为单列。
+脚本引入 `DataAnalysis` 和 `openImageMetricsWindow`，实现 `openMetricsTest()`；创建失败时用 `ElMessage.error` 提示。上方 `.task-cards` 始终保持现有两列，紧凑卡高度约 `96px`、上边距 `16px`，采用横向图标/标题/说明布局；现有 `760px` 断点下改为更紧凑的单列文字布局。
 
 - [ ] **Step 4: 更新 README 的非持久化工具说明**
 
@@ -1194,12 +1252,12 @@ Run:
 npm run tauri:dev
 ```
 
-依次验证：首页第三卡打开弹窗；拖入/选择多图；卡片缩略图不超过 500px；点击图片打开原图预览；选底图后低精度逐张完成；只有点击单卡才计算标准 SSIM；空弹窗直接关闭；非空弹窗取消关闭时保留状态、确认关闭后再次打开为空。
+依次验证：首页两张大卡下方的紧凑卡创建独立窗口；重复点击只聚焦同一窗口；拖入/选择多图；卡片缩略图不超过 500px；点击图片打开原图预览；选底图后低精度逐张完成；只有点击单卡才计算标准 SSIM；空窗口直接关闭；非空窗口通过系统标题栏关闭时取消可保留状态、确认后重新打开为空。
 
 - [ ] **Step 7: 提交入口和文档**
 
 ```powershell
-git add src/views/MainView.vue src/views/MainView.spec.ts README.md
+git add src/features/imageMetrics/window.ts src/features/imageMetrics/window.spec.ts src/views/MainView.vue src/views/MainView.spec.ts README.md
 git commit -m "feat: expose image metrics test tool"
 ```
 
