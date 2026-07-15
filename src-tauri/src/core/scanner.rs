@@ -136,7 +136,7 @@ impl ScanEngine {
                         features.modified_at,
                         features.width,
                         features.height,
-                        features.format,
+                        features.color_type,
                         aspect_ratio,
                         1,       // frame_count
                         "first", // frame_strategy

@@ -157,7 +157,9 @@ where
         total: request.target_roots.len(),
         current_file: None,
     });
-    let target_files = discover_target_files(&request.target_roots, request.recursive)?;
+    let (target_files, discovery_errors) =
+        discover_target_files(&request.target_roots, request.recursive)?;
+    errors.extend(discovery_errors);
     check_cancelled(&is_cancelled)?;
 
     let extracted = AtomicUsize::new(0);
@@ -387,49 +389,65 @@ fn compute_similarity(reference: &ImageFeatures, target: &ImageFeatures) -> Resu
     SsimComputer::compute_from_files(large, small)
 }
 
-fn discover_target_files(roots: &[String], recursive: bool) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let roots = deduplicate_roots(roots)?;
-    let mut files = Vec::new();
+fn discover_target_files(
+    roots: &[String],
+    recursive: bool,
+) -> Result<(Vec<(PathBuf, PathBuf)>, Vec<SearchFileError>)> {
+    let mut valid_roots = Vec::new();
+    let mut errors = Vec::new();
     for root in roots {
+        match std::fs::canonicalize(root) {
+            Ok(path) if path.is_dir() => valid_roots.push(path),
+            Ok(_) => errors.push(SearchFileError {
+                file_path: root.clone(),
+                message: "搜索路径不是目录".to_string(),
+            }),
+            Err(error) => errors.push(SearchFileError {
+                file_path: root.clone(),
+                message: format!("无法访问搜索目录: {error}"),
+            }),
+        }
+    }
+    if valid_roots.is_empty() {
+        return Err(AppError::ValidationError(
+            "所有搜索目录都无法访问".to_string(),
+        ));
+    }
+    valid_roots.sort_by_key(|path| path.components().count());
+    let mut unique_roots = Vec::new();
+    for path in valid_roots {
+        if !unique_roots
+            .iter()
+            .any(|root: &PathBuf| path.starts_with(root))
+        {
+            unique_roots.push(path);
+        }
+    }
+
+    let mut files = Vec::new();
+    for root in unique_roots {
         let mut walker = WalkDir::new(&root).follow_links(false);
         if !recursive {
             walker = walker.max_depth(1);
         }
         for entry in walker {
-            let entry =
-                entry.map_err(|error| AppError::FileSystem(format!("遍历目录失败: {error}")))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(SearchFileError {
+                        file_path: error.path().unwrap_or(&root).to_string_lossy().to_string(),
+                        message: format!("遍历目录失败: {error}"),
+                    });
+                    continue;
+                }
+            };
             if entry.file_type().is_file() && is_supported_image(entry.path()) {
                 files.push((root.clone(), entry.into_path()));
             }
         }
     }
     files.sort_by(|left, right| left.1.cmp(&right.1));
-    Ok(files)
-}
-
-fn deduplicate_roots(roots: &[String]) -> Result<Vec<PathBuf>> {
-    let mut canonical: Vec<PathBuf> = roots
-        .iter()
-        .map(|root| {
-            let path = std::fs::canonicalize(root).map_err(|error| {
-                AppError::FileSystem(format!("无法访问搜索目录 {root}: {error}"))
-            })?;
-            if !path.is_dir() {
-                return Err(AppError::ValidationError(format!(
-                    "搜索路径不是目录: {root}"
-                )));
-            }
-            Ok(path)
-        })
-        .collect::<Result<_>>()?;
-    canonical.sort_by_key(|path| path.components().count());
-    let mut unique = Vec::new();
-    for path in canonical {
-        if !unique.iter().any(|root: &PathBuf| path.starts_with(root)) {
-            unique.push(path);
-        }
-    }
-    Ok(unique)
+    Ok((files, errors))
 }
 
 fn is_supported_image(path: &Path) -> bool {
@@ -475,6 +493,7 @@ mod tests {
             width,
             height,
             format: "png".to_string(),
+            color_type: "Rgb8".to_string(),
             blake3_hash: hash.to_string(),
             phash: phash.to_string(),
         }
@@ -555,5 +574,25 @@ mod tests {
             classify_relation(&reference, &weak, 14, Some(0.60)),
             Some(MatchClassification::WeakCandidate)
         );
+    }
+
+    #[test]
+    fn keeps_scanning_when_one_root_is_unavailable() {
+        let valid = tempfile::tempdir().unwrap();
+        std::fs::write(valid.path().join("candidate.png"), b"not decoded here").unwrap();
+        let missing = valid.path().join("missing");
+
+        let (files, errors) = discover_target_files(
+            &[
+                valid.path().to_string_lossy().to_string(),
+                missing.to_string_lossy().to_string(),
+            ],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].file_path.contains("missing"));
     }
 }

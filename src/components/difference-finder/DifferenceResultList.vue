@@ -7,8 +7,8 @@
         <el-tag size="small" effect="plain">{{ store.filteredMatches.length }}</el-tag>
       </div>
       <div class="result-actions">
-        <el-button size="small" :disabled="!store.filteredMatches.length" @click="store.selectFiltered">选择当前结果</el-button>
-        <el-button size="small" :disabled="!store.selectedPaths.length" @click="store.clearSelection">清空选择</el-button>
+        <el-button size="small" :disabled="store.isRunning || !store.filteredMatches.length" @click="store.selectFiltered">选择当前结果</el-button>
+        <el-button size="small" :disabled="store.isRunning || !store.selectedPaths.length" @click="store.clearSelection">清空选择</el-button>
       </div>
     </div>
 
@@ -43,8 +43,8 @@
         <div class="result-main">
           <div class="name-row">
             <strong :title="item.fileName">{{ item.fileName }}</strong>
-            <el-tag :type="classificationType(item.classification)" size="small">
-              {{ classificationLabel(item.classification) }}
+            <el-tag :type="classificationType(store.classificationForItem(item))" size="small">
+              {{ classificationLabel(store.classificationForItem(item)) }}
             </el-tag>
           </div>
           <p :title="item.filePath">{{ item.relativePath || item.filePath }}</p>

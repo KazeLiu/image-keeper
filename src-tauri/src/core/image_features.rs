@@ -15,6 +15,7 @@ pub struct ImageFeatures {
     pub width: u32,
     pub height: u32,
     pub format: String,
+    pub color_type: String,
     pub blake3_hash: String,
     pub phash: String,
 }
@@ -30,6 +31,7 @@ pub fn extract_image_features(path: &Path) -> Result<ImageFeatures> {
         .unwrap_or_default();
     let image = image::open(path)?;
     let (width, height) = image.dimensions();
+    let color_type = format!("{:?}", image.color());
 
     Ok(ImageFeatures {
         file_path: path.to_string_lossy().to_string(),
@@ -41,6 +43,7 @@ pub fn extract_image_features(path: &Path) -> Result<ImageFeatures> {
             .extension()
             .map(|value| value.to_string_lossy().to_lowercase())
             .unwrap_or_default(),
+        color_type,
         blake3_hash: compute_blake3(path)?,
         phash: compute_phash(&image),
     })
@@ -147,6 +150,7 @@ mod tests {
         assert_eq!(left.phash, right.phash);
         assert_eq!((left.width, left.height), (48, 32));
         assert_eq!(left.format, "png");
+        assert_eq!(left.color_type, "Rgb8");
     }
 
     #[test]
