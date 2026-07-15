@@ -1,4 +1,5 @@
 pub mod comparison;
+pub mod difference_finder;
 pub mod directory;
 pub mod recycle;
 pub mod report;

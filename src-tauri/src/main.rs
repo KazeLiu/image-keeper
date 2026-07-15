@@ -15,6 +15,9 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(repository)))
+        .manage(Arc::new(
+            commands::difference_finder::DifferenceFinderState::default(),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
@@ -27,6 +30,13 @@ fn main() {
             commands::settings::save_settings,
             commands::directory::load_directory_tree,
             commands::directory::open_folder,
+            commands::difference_finder::start_difference_search,
+            commands::difference_finder::cancel_difference_search,
+            commands::difference_finder::preview_difference_rename,
+            commands::difference_finder::execute_difference_rename,
+            commands::difference_finder::move_difference_files,
+            commands::difference_finder::copy_difference_files,
+            commands::difference_finder::undo_difference_batch,
             commands::comparison::start_multi_compare,
             commands::comparison::get_comparison_stats,
             commands::comparison::get_comparison_results,
