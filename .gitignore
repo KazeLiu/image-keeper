@@ -39,3 +39,4 @@ Cargo.lock
 # Tauri
 src-tauri/target/
 src-tauri/WixTools/
+src-tauri/build_warnings.txt

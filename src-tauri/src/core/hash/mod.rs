@@ -1,9 +1,9 @@
 pub mod blake3;
 
-use std::path::Path;
-use crate::error::Result;
+use crate::db::models::ScanProgressEvent;
 use crate::db::repository::Repository;
-use crate::db::models::HashProgressEvent;
+use crate::error::Result;
+use std::path::Path;
 
 /// 哈希引擎
 pub struct HashEngine;
@@ -16,7 +16,7 @@ impl HashEngine {
         progress_callback: F,
     ) -> Result<()>
     where
-        F: Fn(HashProgressEvent) + Send + Sync,
+        F: Fn(ScanProgressEvent) + Send + Sync,
     {
         // 获取所有未计算哈希的图片
         let images = Self::get_images_without_hash(scan_id, repository)?;
@@ -30,20 +30,20 @@ impl HashEngine {
             let hash = blake3::Blake3Computer::compute_file_hash(Path::new(file_path))?;
 
             // 更新数据库
-            repository.update_image_hash(*id, &hash)?;
+            repository.update_image_hash(*id, &hash, "", "")?;
 
             // 更新进度
             hashed_count += 1;
             let hashed = hashed_count;
 
             // 发送进度事件
-            progress_callback(HashProgressEvent {
-                scan_id,
-                total_files,
-                hashed_files: hashed,
-                current_file: file_path.clone(),
+            progress_callback(ScanProgressEvent {
+                run_id: "".to_string(), // TODO: 传入 run_id
+                phase: "hash_computation".to_string(),
+                total_files: total_files as i64,
+                processed_files: hashed as i64,
+                current_file: Some(file_path.clone()),
             });
-
         }
 
         // 更新扫描任务的哈希计算完成数
@@ -94,10 +94,7 @@ impl HashEngine {
 
         // 为每组重复文件创建记录
         for (hash, ids_str) in duplicate_groups {
-            let ids: Vec<i64> = ids_str
-                .split(',')
-                .filter_map(|s| s.parse().ok())
-                .collect();
+            let ids: Vec<i64> = ids_str.split(',').filter_map(|s| s.parse().ok()).collect();
 
             if ids.len() < 2 {
                 continue;

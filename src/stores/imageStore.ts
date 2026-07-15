@@ -30,7 +30,7 @@ export const useImageStore = defineStore('image', () => {
   })
 
   // Actions
-  async function loadImages(scanId: number) {
+  async function loadImages(_scanId: number) {
     isLoading.value = true
     try {
       // TODO: 从后端加载图片列表
@@ -44,7 +44,7 @@ export const useImageStore = defineStore('image', () => {
     }
   }
 
-  async function loadDuplicates(scanId: number) {
+  async function loadDuplicates(_scanId: number) {
     isLoading.value = true
     try {
       // TODO: 从后端加载重复文件列表
@@ -58,7 +58,7 @@ export const useImageStore = defineStore('image', () => {
     }
   }
 
-  async function loadSimilarPairs(scanId: number) {
+  async function loadSimilarPairs(_scanId: number) {
     isLoading.value = true
     try {
       // TODO: 从后端加载相似图片配对

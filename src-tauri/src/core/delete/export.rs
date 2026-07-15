@@ -1,8 +1,8 @@
+use crate::db::repository::Repository;
+use crate::error::Result;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use crate::error::Result;
-use crate::db::repository::Repository;
 
 /// 导出管理器
 pub struct ExportManager;
@@ -18,9 +18,9 @@ impl ExportManager {
         let mut writer = BufWriter::new(file);
 
         // 查询所有回收站中的文件
-        let mut stmt = repository.conn().prepare(
-            "SELECT original_path FROM recycle_bin ORDER BY recycled_at",
-        )?;
+        let mut stmt = repository
+            .conn()
+            .prepare("SELECT original_path FROM recycle_bin ORDER BY recycled_at")?;
 
         let paths: Vec<String> = stmt
             .query_map([], |row| row.get(0))?

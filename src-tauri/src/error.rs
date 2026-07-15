@@ -24,6 +24,9 @@ pub enum AppError {
     #[error("图片不存在: {0}")]
     ImageNotFound(i64),
 
+    #[error("资源不存在: {0}")]
+    NotFound(String),
+
     #[error("不支持的图片格式: {0}")]
     UnsupportedFormat(String),
 
@@ -41,6 +44,9 @@ pub enum AppError {
 
     #[error("内部错误: {0}")]
     Internal(String),
+
+    #[error("CSV 错误: {0}")]
+    Csv(#[from] csv::Error),
 
     #[error("其他错误: {0}")]
     Other(String),

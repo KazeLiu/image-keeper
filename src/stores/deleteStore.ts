@@ -36,7 +36,7 @@ export const useDeleteStore = defineStore('delete', () => {
     }
   }
 
-  async function moveToRecycleBin(imageIds: number[]) {
+  async function moveToRecycleBin(_imageIds: number[]) {
     isDeleting.value = true
     try {
       // TODO: 调用后端移动到回收站
@@ -65,7 +65,7 @@ export const useDeleteStore = defineStore('delete', () => {
     }
   }
 
-  async function restoreFromRecycleBin(entryIds: number[]) {
+  async function restoreFromRecycleBin(_entryIds: number[]) {
     isDeleting.value = true
     try {
       // TODO: 调用后端恢复文件
@@ -79,7 +79,7 @@ export const useDeleteStore = defineStore('delete', () => {
     }
   }
 
-  async function exportDeleteList(outputPath: string) {
+  async function exportDeleteList(_outputPath: string) {
     try {
       // TODO: 调用后端导出删除列表
       // await invoke('export_delete_list', { outputPath })
@@ -89,7 +89,7 @@ export const useDeleteStore = defineStore('delete', () => {
     }
   }
 
-  async function exportReport(outputPath: string) {
+  async function exportReport(_outputPath: string) {
     try {
       // TODO: 调用后端导出报告
       // await invoke('export_report', { outputPath })

@@ -9,7 +9,7 @@
       </template>
 
       <el-form :model="settingsForm" label-width="180px" label-position="left">
-        <el-form-item label="SSIM 相似度阈值">
+        <el-form-item label="图片相似度阈值">
           <el-slider
             v-model="settingsForm.ssimThreshold"
             :min="0.9"

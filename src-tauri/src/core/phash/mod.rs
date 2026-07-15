@@ -1,8 +1,8 @@
 pub mod engine;
 
-use std::path::Path;
 use crate::error::Result;
-use image::GenericImageView;
+use base64::{engine::general_purpose, Engine as _};
+use std::path::Path;
 
 /// pHash 计算器
 pub struct PHashComputer;
@@ -14,12 +14,7 @@ impl PHashComputer {
 
         // 1. 转为灰度并缩放到 32x32
         let gray = img.to_luma8();
-        let resized = image::imageops::resize(
-            &gray,
-            32,
-            32,
-            image::imageops::FilterType::Lanczos3
-        );
+        let resized = image::imageops::resize(&gray, 32, 32, image::imageops::FilterType::Lanczos3);
 
         // 2. 计算 DCT (简化版：使用均值哈希代替)
         let pixels: Vec<u8> = resized.into_raw();
@@ -34,25 +29,31 @@ impl PHashComputer {
         }
 
         // 4. 转换为 base64 字符串
-        let hash_bytes: Vec<u8> = hash_bits.chunks(8)
+        let hash_bytes: Vec<u8> = hash_bits
+            .chunks(8)
             .map(|bits| {
-                bits.iter().enumerate()
+                bits.iter()
+                    .enumerate()
                     .fold(0u8, |acc, (i, &bit)| acc | (bit << i))
             })
             .collect();
 
-        Ok(base64::encode(&hash_bytes))
+        Ok(general_purpose::STANDARD.encode(&hash_bytes))
     }
 
     /// 计算两个 pHash 之间的汉明距离
     pub fn hamming_distance(hash1: &str, hash2: &str) -> Result<u32> {
-        let bytes1 = base64::decode(hash1)
+        let bytes1 = general_purpose::STANDARD
+            .decode(hash1)
             .map_err(|e| crate::error::AppError::Internal(format!("解析 hash1 失败: {:?}", e)))?;
-        let bytes2 = base64::decode(hash2)
+        let bytes2 = general_purpose::STANDARD
+            .decode(hash2)
             .map_err(|e| crate::error::AppError::Internal(format!("解析 hash2 失败: {:?}", e)))?;
 
         if bytes1.len() != bytes2.len() {
-            return Err(crate::error::AppError::Internal("哈希长度不一致".to_string()));
+            return Err(crate::error::AppError::Internal(
+                "哈希长度不一致".to_string(),
+            ));
         }
 
         let mut distance = 0u32;

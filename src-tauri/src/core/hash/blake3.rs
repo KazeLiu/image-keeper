@@ -1,8 +1,8 @@
-use std::path::Path;
+use crate::error::Result;
+use blake3::Hasher;
 use std::fs::File;
 use std::io::Read;
-use blake3::Hasher;
-use crate::error::{Result};
+use std::path::Path;
 
 /// BLAKE3 哈希计算器
 pub struct Blake3Computer;

@@ -1,7 +1,8 @@
-use std::path::Path;
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
+use walkdir::WalkDir;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TreeNode {
@@ -68,6 +69,33 @@ pub fn load_directory_tree(path: String) -> Result<Vec<TreeNode>, String> {
     Ok(vec![tree])
 }
 
+/// 使用系统文件管理器打开目录
+#[tauri::command]
+pub fn open_folder(path: String) -> Result<(), String> {
+    let folder_path = Path::new(&path);
+
+    if !folder_path.exists() {
+        return Err("目录不存在".to_string());
+    }
+
+    if !folder_path.is_dir() {
+        return Err("路径不是目录".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer").arg(folder_path).spawn();
+
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(folder_path).spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = Command::new("xdg-open").arg(folder_path).spawn();
+
+    result
+        .map(|_| ())
+        .map_err(|e| format!("打开目录失败: {}", e))
+}
+
 fn build_tree(path: &Path, dir_info: &HashMap<String, (String, usize)>) -> TreeNode {
     let path_str = path.to_string_lossy().to_string();
     let label = path
@@ -76,7 +104,10 @@ fn build_tree(path: &Path, dir_info: &HashMap<String, (String, usize)>) -> TreeN
         .to_string_lossy()
         .to_string();
 
-    let file_count = dir_info.get(&path_str).map(|(_, count)| *count).unwrap_or(0);
+    let file_count = dir_info
+        .get(&path_str)
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
 
     // 获取直接子目录
     let mut children = Vec::new();

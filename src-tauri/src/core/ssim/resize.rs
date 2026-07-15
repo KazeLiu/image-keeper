@@ -1,8 +1,8 @@
-use std::path::Path;
-use std::num::NonZeroU32;
-use image::DynamicImage;
+use crate::error::{AppError, Result};
 use fast_image_resize as fr;
-use crate::error::{Result, AppError};
+use image::DynamicImage;
+use std::num::NonZeroU32;
+use std::path::Path;
 
 /// 图片缩放器
 pub struct ImageResizer;
@@ -26,14 +26,19 @@ impl ImageResizer {
             src_image.into_raw(),
             fr::PixelType::U8x4,
         )
-        .map_err(|e| AppError::Image(image::ImageError::IoError(
-            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-        )))?;
+        .map_err(|e| {
+            AppError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))
+        })?;
 
         // 创建目标图片
         let mut dst = fr::Image::new(
-            NonZeroU32::new(target_width).ok_or_else(|| AppError::Other("目标宽度为0".to_string()))?,
-            NonZeroU32::new(target_height).ok_or_else(|| AppError::Other("目标高度为0".to_string()))?,
+            NonZeroU32::new(target_width)
+                .ok_or_else(|| AppError::Other("目标宽度为0".to_string()))?,
+            NonZeroU32::new(target_height)
+                .ok_or_else(|| AppError::Other("目标高度为0".to_string()))?,
             fr::PixelType::U8x4,
         );
 
@@ -43,9 +48,12 @@ impl ImageResizer {
         // 执行缩放
         resizer
             .resize(&src.view(), &mut dst.view_mut())
-            .map_err(|e| AppError::Image(image::ImageError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-            )))?;
+            .map_err(|e| {
+                AppError::Image(image::ImageError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )))
+            })?;
 
         // 转换回 DynamicImage
         let buffer = image::RgbaImage::from_raw(target_width, target_height, dst.into_vec())

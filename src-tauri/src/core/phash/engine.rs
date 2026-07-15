@@ -1,8 +1,8 @@
-use std::path::Path;
-use crate::error::Result;
-use crate::db::repository::Repository;
-use crate::db::models::PHashProgressEvent;
 use super::PHashComputer;
+use crate::db::models::ScanProgressEvent;
+use crate::db::repository::Repository;
+use crate::error::Result;
+use std::path::Path;
 
 /// pHash 引擎
 pub struct PHashEngine;
@@ -15,7 +15,7 @@ impl PHashEngine {
         progress_callback: F,
     ) -> Result<()>
     where
-        F: Fn(PHashProgressEvent) + Send + Sync,
+        F: Fn(ScanProgressEvent) + Send + Sync,
     {
         // 获取所有未计算 pHash 的图片
         let images = Self::get_images_without_phash(scan_id, repository)?;
@@ -39,11 +39,12 @@ impl PHashEngine {
             let phashed = phashed_count;
 
             // 发送进度事件
-            progress_callback(PHashProgressEvent {
-                scan_id,
-                total_files,
-                phashed_files: phashed,
-                current_file: file_path.clone(),
+            progress_callback(ScanProgressEvent {
+                run_id: "".to_string(), // TODO: 传入 run_id
+                phase: "phash_computation".to_string(),
+                total_files: total_files as i64,
+                processed_files: phashed as i64,
+                current_file: Some(file_path.clone()),
             });
         }
 
@@ -61,9 +62,9 @@ impl PHashEngine {
         scan_id: i64,
         repository: &Repository,
     ) -> Result<Vec<(i64, String)>> {
-        let mut stmt = repository.conn().prepare(
-            "SELECT id, file_path FROM images WHERE scan_id = ?1 AND phash IS NULL",
-        )?;
+        let mut stmt = repository
+            .conn()
+            .prepare("SELECT id, file_path FROM images WHERE scan_id = ?1 AND phash IS NULL")?;
 
         let images = stmt
             .query_map(rusqlite::params![scan_id], |row| {
@@ -82,9 +83,9 @@ impl PHashEngine {
         hamming_threshold: u32,
     ) -> Result<Vec<(i64, i64, u32)>> {
         // 获取所有已计算 pHash 的图片
-        let mut stmt = repository.conn().prepare(
-            "SELECT id, phash FROM images WHERE scan_id = ?1 AND phash IS NOT NULL",
-        )?;
+        let mut stmt = repository
+            .conn()
+            .prepare("SELECT id, phash FROM images WHERE scan_id = ?1 AND phash IS NOT NULL")?;
 
         let images: Vec<(i64, String)> = stmt
             .query_map(rusqlite::params![scan_id], |row| {

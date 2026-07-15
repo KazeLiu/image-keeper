@@ -1,26 +1,701 @@
-use tauri::{Emitter, State, Window};
+use crate::db::models::{AnalysisType, ComparisonStats, RunStatus};
+use crate::db::repository::{Repository, RunConfig};
+use crate::error::{AppError, Result};
+use chrono::Utc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
-use crate::error::Result;
-use crate::db::repository::Repository;
-use crate::db::models::{Scan, CompareMode, FolderRole, Folder, ScanProgressEvent, HashProgressEvent, PHashProgressEvent, MatchProgressEvent};
-use crate::core::scanner::walker::DirectoryWalker;
-use crate::core::hash::HashEngine;
-use crate::core::phash::engine::PHashEngine;
-use crate::core::comparison::ComparisonEngine;
-use crate::core::scanner::metadata::MetadataExtractor;
+use tauri::{Emitter, State, Window};
 
 /// 多文件夹对比请求
 #[derive(Debug, serde::Deserialize)]
 pub struct MultiCompareRequest {
-    pub folders: Vec<FolderConfig>,
-    pub compare_mode: String,
+    pub baseline_path: String,
+    pub comparison_paths: Vec<String>,
+    pub directory_options: Option<Vec<DirectoryCompareOption>>,
 }
 
+/// 目录级对比选项
 #[derive(Debug, serde::Deserialize)]
-pub struct FolderConfig {
+pub struct DirectoryCompareOption {
     pub path: String,
+    pub compare_within: bool,
+}
+
+/// 运行状态快照
+#[derive(Debug, serde::Serialize)]
+pub struct RunStatusResponse {
+    pub run_id: String,
+    pub status: RunStatus,
+    pub completed_at: Option<i64>,
+}
+
+/// 历史运行列表行
+#[derive(Debug, serde::Serialize)]
+pub struct ComparisonRunHistoryItem {
+    pub run_id: String,
+    pub status: RunStatus,
+    pub baseline_root_path: String,
+    pub comparison_root_paths: Vec<String>,
+    pub baseline_total: i64,
+    pub comparison_total: i64,
+    pub result_count: i64,
+    pub error_count: i64,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
+
+/// 前端分类结果列表行
+#[derive(Debug, serde::Serialize)]
+pub struct ComparisonResultRow {
+    pub id: i64,
+    pub run_id: String,
+    pub comparison_image_id: i64,
+    pub comparison_path: String,
+    pub comparison_relative_path: String,
+    pub comparison_file_size: i64,
+    pub comparison_width: u32,
+    pub comparison_height: u32,
+    pub analysis_type: AnalysisType,
+    pub primary_match_image_id: Option<i64>,
+    pub primary_match_path: Option<String>,
+    pub primary_match_relative_path: Option<String>,
+    pub all_candidate_ids: Option<Vec<i64>>,
+    pub candidate_truncated: bool,
+    pub phash_distance: Option<i32>,
+    pub ssim_score: Option<f64>,
+    pub size_ratio: Option<f64>,
+    pub resolution_ratio: Option<f64>,
+    pub aspect_diff: Option<f64>,
+    pub direction_smaller_resolution: bool,
+    pub direction_smaller_filesize: bool,
+    pub algorithm_profile_id: String,
+    pub analysis_metadata: Option<String>,
+    pub computed_at: i64,
+}
+
+/// pHash 粗分组
+#[derive(Debug, serde::Serialize)]
+pub struct ComparisonGroup {
+    pub group_index: usize,
+    pub representative_image_id: i64,
+    pub representative_file_name: String,
+    pub member_count: usize,
+    pub has_low_quality_suggestion: bool,
+    pub members: Vec<ComparisonGroupMember>,
+}
+
+/// 分组内图片行
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct ComparisonGroupMember {
+    pub image_id: i64,
+    pub file_path: String,
+    pub relative_path: String,
+    pub file_size: i64,
+    pub width: u32,
+    pub height: u32,
+    pub phash: Option<String>,
+    pub phash_distance_to_reference: Option<i32>,
     pub role: String,
+    pub role_label: String,
+    pub reference_image_id: Option<i64>,
+    pub reference_relative_path: Option<String>,
+    pub ssim_score: Option<f64>,
+    pub ssim_cluster_key: String,
+    pub is_low_quality_suggestion: bool,
+}
+
+/// 当前分组内两两图片相似度。用于前端把缩略图挂到最像的原图下面。
+#[derive(Debug, serde::Serialize)]
+pub struct GroupSimilarityScore {
+    pub left_image_id: i64,
+    pub right_image_id: i64,
+    pub ssim_score: Option<f64>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ImageSummary {
+    id: i64,
+    file_path: String,
+    relative_path: String,
+    file_size: i64,
+    width: u32,
+    height: u32,
+    phash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AnalysisSummary {
+    analysis_type: AnalysisType,
+    primary_match_image_id: Option<i64>,
+    phash_distance: Option<i32>,
+    ssim_score: Option<f64>,
+}
+
+fn read_run_status(repo: &Repository, run_id: &str) -> Result<RunStatusResponse> {
+    let run = repo
+        .get_run(run_id)?
+        .ok_or_else(|| AppError::NotFound(format!("运行不存在: {}", run_id)))?;
+
+    Ok(RunStatusResponse {
+        run_id: run.run_id,
+        status: run.status,
+        completed_at: run.completed_at,
+    })
+}
+
+fn read_comparison_run_history(
+    repo: &Repository,
+    limit: i64,
+) -> Result<Vec<ComparisonRunHistoryItem>> {
+    let active_limit = limit.clamp(1, 50);
+    let mut stmt = repo.conn().prepare(
+        r#"SELECT
+               r.run_id,
+               r.status,
+               r.baseline_root_path,
+               r.comparison_root_paths,
+               r.total_baseline_files,
+               r.total_comparison_files,
+               r.error_count,
+               r.created_at,
+               r.started_at,
+               r.completed_at,
+               (SELECT COUNT(*) FROM analysis_results ar WHERE ar.run_id = r.run_id) AS result_count,
+               (SELECT COUNT(*) FROM images i WHERE i.run_id = r.run_id AND i.source_role = 'baseline') AS baseline_image_count,
+               (SELECT COUNT(*) FROM images i WHERE i.run_id = r.run_id AND i.source_role = 'comparison') AS comparison_image_count
+           FROM runs r
+           ORDER BY r.created_at DESC, r.id DESC
+           LIMIT ?1"#,
+    )?;
+
+    let rows = stmt.query_map([active_limit], |row| {
+        let status_raw: String = row.get(1)?;
+        let comparison_paths_raw: String = row.get(3)?;
+        let comparison_root_paths =
+            serde_json::from_str::<Vec<String>>(&comparison_paths_raw).unwrap_or_default();
+
+        let total_baseline_files = row.get::<_, i64>(4)?;
+        let total_comparison_files = row.get::<_, i64>(5)?;
+        let result_count = row.get::<_, i64>(10)?;
+        let baseline_image_count = row.get::<_, i64>(11)?;
+        let comparison_image_count = row.get::<_, i64>(12)?;
+
+        Ok(ComparisonRunHistoryItem {
+            run_id: row.get(0)?,
+            status: RunStatus::from_str(&status_raw).unwrap_or(RunStatus::Failed),
+            baseline_root_path: row.get(2)?,
+            comparison_root_paths,
+            baseline_total: total_baseline_files.max(baseline_image_count),
+            comparison_total: total_comparison_files.max(comparison_image_count.max(result_count)),
+            error_count: row.get(6)?,
+            created_at: row.get(7)?,
+            started_at: row.get(8)?,
+            completed_at: row.get(9)?,
+            result_count,
+        })
+    })?;
+
+    let mut history = Vec::new();
+    for row in rows {
+        history.push(row?);
+    }
+
+    Ok(history)
+}
+
+fn delete_comparison_run_records(repo: &Repository, run_id: &str) -> Result<()> {
+    if repo.get_run(run_id)?.is_none() {
+        return Err(AppError::NotFound(format!("历史任务不存在: {}", run_id)));
+    }
+
+    repo.conn().execute(
+        r#"DELETE FROM review_status
+           WHERE analysis_result_id IN (
+               SELECT id FROM analysis_results WHERE run_id = ?1
+           )"#,
+        [run_id],
+    )?;
+    repo.conn()
+        .execute("DELETE FROM recycle_bin WHERE run_id = ?1", [run_id])?;
+    repo.conn()
+        .execute("DELETE FROM operation_logs WHERE run_id = ?1", [run_id])?;
+    repo.conn()
+        .execute("DELETE FROM analysis_results WHERE run_id = ?1", [run_id])?;
+    repo.conn()
+        .execute("DELETE FROM images WHERE run_id = ?1", [run_id])?;
+    repo.conn()
+        .execute("DELETE FROM folders WHERE run_id = ?1", [run_id])?;
+    repo.conn()
+        .execute("DELETE FROM runs WHERE run_id = ?1", [run_id])?;
+
+    Ok(())
+}
+
+fn read_comparison_results(repo: &Repository, run_id: &str) -> Result<Vec<ComparisonResultRow>> {
+    let mut stmt = repo.conn().prepare(
+        r#"SELECT
+               ar.id,
+               ar.run_id,
+               ar.comparison_image_id,
+               ci.file_path,
+               ci.relative_path,
+               ci.file_size,
+               ci.width,
+               ci.height,
+               ar.analysis_type,
+               ar.primary_match_image_id,
+               bi.file_path,
+               bi.relative_path,
+               ar.all_candidate_ids,
+               ar.candidate_truncated,
+               ar.phash_distance,
+               ar.ssim_score,
+               ar.size_ratio,
+               ar.resolution_ratio,
+               ar.aspect_diff,
+               ar.direction_smaller_resolution,
+               ar.direction_smaller_filesize,
+               ar.algorithm_profile_id,
+               ar.analysis_metadata,
+               ar.computed_at
+           FROM analysis_results ar
+           JOIN images ci ON ar.comparison_image_id = ci.id
+           LEFT JOIN images bi ON ar.primary_match_image_id = bi.id
+           WHERE ar.run_id = ?1
+           ORDER BY
+               CASE ar.analysis_type
+                   WHEN 'exact_duplicate' THEN 1
+                   WHEN 'likely_compressed' THEN 2
+                   WHEN 'variant' THEN 3
+                   WHEN 'inconclusive' THEN 4
+                   WHEN 'similar_keep' THEN 5
+                   WHEN 'no_baseline_match' THEN 6
+                   WHEN 'not_evaluated' THEN 7
+                   ELSE 8
+               END,
+               ar.id"#,
+    )?;
+
+    let rows = stmt
+        .query_map([run_id], |row| {
+            let analysis_type_raw: String = row.get(8)?;
+            let all_candidate_ids = row
+                .get::<_, Option<String>>(12)?
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+
+            Ok(ComparisonResultRow {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                comparison_image_id: row.get(2)?,
+                comparison_path: row.get(3)?,
+                comparison_relative_path: row.get(4)?,
+                comparison_file_size: row.get(5)?,
+                comparison_width: row.get(6)?,
+                comparison_height: row.get(7)?,
+                analysis_type: AnalysisType::from_str(&analysis_type_raw)
+                    .unwrap_or(AnalysisType::Error),
+                primary_match_image_id: row.get(9)?,
+                primary_match_path: row.get(10)?,
+                primary_match_relative_path: row.get(11)?,
+                all_candidate_ids,
+                candidate_truncated: row.get(13)?,
+                phash_distance: row.get(14)?,
+                ssim_score: row.get(15)?,
+                size_ratio: row.get(16)?,
+                resolution_ratio: row.get(17)?,
+                aspect_diff: row.get(18)?,
+                direction_smaller_resolution: row.get(19)?,
+                direction_smaller_filesize: row.get(20)?,
+                algorithm_profile_id: row.get(21)?,
+                analysis_metadata: row.get(22)?,
+                computed_at: row.get(23)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows)
+}
+
+fn read_completed_images(repo: &Repository, run_id: &str) -> Result<Vec<ImageSummary>> {
+    let mut stmt = repo.conn().prepare(
+        r#"SELECT id, file_path, relative_path, file_size, width, height, phash
+           FROM images
+           WHERE run_id = ?1
+             AND scan_status = 'completed'
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM analysis_results ar
+                 WHERE ar.run_id = images.run_id
+                   AND ar.comparison_image_id = images.id
+                   AND COALESCE((
+                       SELECT ol.operation_type
+                       FROM operation_logs ol
+                       WHERE ol.analysis_result_id = ar.id
+                       ORDER BY ol.created_at DESC, ol.id DESC
+                       LIMIT 1
+                   ), 'none') IN ('recycled', 'permanently_deleted')
+             )
+           ORDER BY relative_path, id"#,
+    )?;
+
+    let images = stmt
+        .query_map([run_id], |row| {
+            Ok(ImageSummary {
+                id: row.get(0)?,
+                file_path: row.get(1)?,
+                relative_path: row.get(2)?,
+                file_size: row.get(3)?,
+                width: row.get(4)?,
+                height: row.get(5)?,
+                phash: row.get(6)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(images)
+}
+
+fn read_images_by_ids(
+    repo: &Repository,
+    run_id: &str,
+    image_ids: &[i64],
+) -> Result<Vec<ImageSummary>> {
+    if image_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if image_ids.len() > 80 {
+        return Err(AppError::ValidationError(
+            "单个分组图片过多，请先调严格分组范围后再查看详情".to_string(),
+        ));
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(image_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"SELECT id, file_path, relative_path, file_size, width, height, phash
+           FROM images
+           WHERE run_id = ? AND scan_status = 'completed' AND id IN ({placeholders})
+           ORDER BY relative_path, id"#
+    );
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(image_ids.len() + 1);
+    params.push(run_id.to_string().into());
+    params.extend(image_ids.iter().copied().map(Into::into));
+
+    let mut stmt = repo.conn().prepare(&sql)?;
+    let images = stmt
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(ImageSummary {
+                id: row.get(0)?,
+                file_path: row.get(1)?,
+                relative_path: row.get(2)?,
+                file_size: row.get(3)?,
+                width: row.get(4)?,
+                height: row.get(5)?,
+                phash: row.get(6)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(images)
+}
+
+fn read_analysis_summaries(
+    repo: &Repository,
+    run_id: &str,
+) -> Result<HashMap<i64, AnalysisSummary>> {
+    let mut stmt = repo.conn().prepare(
+        r#"SELECT comparison_image_id, analysis_type, primary_match_image_id, phash_distance, ssim_score
+           FROM analysis_results
+           WHERE run_id = ?1"#,
+    )?;
+
+    let rows = stmt.query_map([run_id], |row| {
+        let analysis_type_raw: String = row.get(1)?;
+        Ok((
+            row.get::<_, i64>(0)?,
+            AnalysisSummary {
+                analysis_type: AnalysisType::from_str(&analysis_type_raw)
+                    .unwrap_or(AnalysisType::Error),
+                primary_match_image_id: row.get(2)?,
+                phash_distance: row.get(3)?,
+                ssim_score: row.get(4)?,
+            },
+        ))
+    })?;
+
+    let mut summaries = HashMap::new();
+    for row in rows {
+        let (image_id, summary) = row?;
+        summaries.insert(image_id, summary);
+    }
+
+    Ok(summaries)
+}
+
+fn find_parent(parent: &mut [usize], index: usize) -> usize {
+    if parent[index] != index {
+        parent[index] = find_parent(parent, parent[index]);
+    }
+    parent[index]
+}
+
+fn union_parent(parent: &mut [usize], left: usize, right: usize) {
+    let left_root = find_parent(parent, left);
+    let right_root = find_parent(parent, right);
+
+    if left_root != right_root {
+        parent[right_root] = left_root;
+    }
+}
+
+fn pixel_count(image: &ImageSummary) -> u64 {
+    image.width as u64 * image.height as u64
+}
+
+fn file_name_from_path(path: &str) -> String {
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+fn choose_group_reference<'a>(images: &'a [&ImageSummary]) -> &'a ImageSummary {
+    images
+        .iter()
+        .copied()
+        .max_by(|left, right| {
+            pixel_count(left)
+                .cmp(&pixel_count(right))
+                .then(left.file_size.cmp(&right.file_size))
+                .then(right.relative_path.cmp(&left.relative_path))
+        })
+        .expect("group contains at least one image")
+}
+
+fn build_group_member(
+    image: &ImageSummary,
+    reference: &ImageSummary,
+    image_by_id: &HashMap<i64, ImageSummary>,
+    analysis_by_image_id: &HashMap<i64, AnalysisSummary>,
+) -> ComparisonGroupMember {
+    use crate::core::matching::PhashMatcher;
+
+    let analysis = analysis_by_image_id.get(&image.id);
+    let relation_reference = analysis
+        .and_then(|summary| summary.primary_match_image_id)
+        .and_then(|id| image_by_id.get(&id));
+
+    let effective_reference = relation_reference.unwrap_or(reference);
+    let phash_distance_to_reference = match (&image.phash, &effective_reference.phash) {
+        (Some(left), Some(right)) if image.id != effective_reference.id => {
+            PhashMatcher::hamming_distance(left, right)
+        }
+        _ => None,
+    };
+
+    let image_pixels = pixel_count(image);
+    let reference_pixels = pixel_count(effective_reference);
+    let primary_is_better = reference_pixels > image_pixels
+        || (reference_pixels == image_pixels && effective_reference.file_size > image.file_size);
+
+    let ssim_score = analysis.and_then(|summary| summary.ssim_score);
+    let is_low_quality_suggestion = analysis.is_some_and(|summary| {
+        summary.analysis_type == AnalysisType::LikelyCompressed
+            || (summary.ssim_score.unwrap_or(0.0) >= 0.995 && primary_is_better)
+    });
+
+    let (role, role_label) = if image.id == reference.id {
+        ("reference", "组内参考图")
+    } else if is_low_quality_suggestion {
+        ("lower_quality", "疑似低质量")
+    } else if analysis.is_some_and(|summary| summary.analysis_type == AnalysisType::Inconclusive) {
+        ("needs_review", "需确认")
+    } else if analysis.is_some_and(|summary| summary.analysis_type == AnalysisType::NoBaselineMatch)
+    {
+        ("standalone", "无相似对象")
+    } else {
+        ("candidate", "相似候选")
+    };
+
+    let ssim_cluster_key = analysis
+        .and_then(|summary| summary.primary_match_image_id)
+        .unwrap_or(image.id)
+        .to_string();
+
+    ComparisonGroupMember {
+        image_id: image.id,
+        file_path: image.file_path.clone(),
+        relative_path: image.relative_path.clone(),
+        file_size: image.file_size,
+        width: image.width,
+        height: image.height,
+        phash: image.phash.clone(),
+        phash_distance_to_reference: analysis
+            .and_then(|summary| summary.phash_distance)
+            .or(phash_distance_to_reference),
+        role: role.to_string(),
+        role_label: role_label.to_string(),
+        reference_image_id: if image.id == effective_reference.id {
+            None
+        } else {
+            Some(effective_reference.id)
+        },
+        reference_relative_path: if image.id == effective_reference.id {
+            None
+        } else {
+            Some(effective_reference.relative_path.clone())
+        },
+        ssim_score,
+        ssim_cluster_key,
+        is_low_quality_suggestion,
+    }
+}
+
+fn read_comparison_groups(
+    repo: &Repository,
+    run_id: &str,
+    grouping_distance: Option<i32>,
+) -> Result<Vec<ComparisonGroup>> {
+    use crate::core::matching::PhashMatcher;
+
+    let run = repo
+        .get_run(run_id)?
+        .ok_or_else(|| AppError::NotFound(format!("运行不存在: {}", run_id)))?;
+    let active_grouping_distance = grouping_distance
+        .unwrap_or(run.phash_max_distance)
+        .clamp(0, 24);
+    let images = read_completed_images(repo, run_id)?;
+    let analysis_by_image_id = read_analysis_summaries(repo, run_id)?;
+    let image_by_id: HashMap<i64, ImageSummary> = images
+        .iter()
+        .map(|image| (image.id, image.clone()))
+        .collect();
+
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut parent: Vec<usize> = (0..images.len()).collect();
+    for left_index in 0..images.len() {
+        for right_index in (left_index + 1)..images.len() {
+            let (Some(left_phash), Some(right_phash)) =
+                (&images[left_index].phash, &images[right_index].phash)
+            else {
+                continue;
+            };
+
+            let Some(distance) = PhashMatcher::hamming_distance(left_phash, right_phash) else {
+                continue;
+            };
+
+            if distance <= active_grouping_distance {
+                union_parent(&mut parent, left_index, right_index);
+            }
+        }
+    }
+
+    let mut grouped_indices: HashMap<usize, Vec<usize>> = HashMap::new();
+    for index in 0..images.len() {
+        let root = find_parent(&mut parent, index);
+        grouped_indices.entry(root).or_default().push(index);
+    }
+
+    let mut raw_groups: Vec<Vec<&ImageSummary>> = grouped_indices
+        .values()
+        .map(|indices| {
+            let mut group_images: Vec<&ImageSummary> =
+                indices.iter().map(|index| &images[*index]).collect();
+            group_images.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+            group_images
+        })
+        .collect();
+
+    raw_groups.sort_by(|left, right| {
+        right
+            .len()
+            .cmp(&left.len())
+            .then(left[0].relative_path.cmp(&right[0].relative_path))
+    });
+
+    let groups = raw_groups
+        .into_iter()
+        .enumerate()
+        .map(|(group_index, group_images)| {
+            let reference = choose_group_reference(&group_images);
+            let mut members: Vec<ComparisonGroupMember> = group_images
+                .iter()
+                .map(|image| {
+                    build_group_member(image, reference, &image_by_id, &analysis_by_image_id)
+                })
+                .collect();
+
+            members.sort_by(|left, right| {
+                left.ssim_cluster_key
+                    .cmp(&right.ssim_cluster_key)
+                    .then(left.role.cmp(&right.role))
+                    .then(left.relative_path.cmp(&right.relative_path))
+            });
+
+            ComparisonGroup {
+                group_index: group_index + 1,
+                representative_image_id: reference.id,
+                representative_file_name: file_name_from_path(&reference.relative_path),
+                member_count: members.len(),
+                has_low_quality_suggestion: members
+                    .iter()
+                    .any(|member| member.is_low_quality_suggestion),
+                members,
+            }
+        })
+        .collect();
+
+    Ok(groups)
+}
+
+fn compute_group_similarity_scores(images: &[ImageSummary]) -> Vec<GroupSimilarityScore> {
+    use crate::core::ssim::SsimEngine;
+
+    let mut scores = Vec::new();
+    for left_index in 0..images.len() {
+        for right_index in (left_index + 1)..images.len() {
+            let left = &images[left_index];
+            let right = &images[right_index];
+            let (large, small) = if compare_image_quality(left, right) != std::cmp::Ordering::Less {
+                (left, right)
+            } else {
+                (right, left)
+            };
+
+            match SsimEngine::compute_ssim(Path::new(&large.file_path), Path::new(&small.file_path))
+            {
+                Ok(ssim_score) => scores.push(GroupSimilarityScore {
+                    left_image_id: left.id,
+                    right_image_id: right.id,
+                    ssim_score: Some(ssim_score),
+                    error_message: None,
+                }),
+                Err(error) => scores.push(GroupSimilarityScore {
+                    left_image_id: left.id,
+                    right_image_id: right.id,
+                    ssim_score: None,
+                    error_message: Some(error.to_string()),
+                }),
+            }
+        }
+    }
+
+    scores
+}
+
+fn compare_image_quality(left: &ImageSummary, right: &ImageSummary) -> std::cmp::Ordering {
+    pixel_count(left)
+        .cmp(&pixel_count(right))
+        .then(left.file_size.cmp(&right.file_size))
+        .then(right.relative_path.cmp(&left.relative_path))
 }
 
 /// 开始多文件夹对比扫描
@@ -29,245 +704,624 @@ pub async fn start_multi_compare(
     request: MultiCompareRequest,
     window: Window,
     repo: State<'_, Arc<Mutex<Repository>>>,
-) -> Result<Scan> {
-    let repo_clone = repo.inner().clone();
+) -> Result<String> {
+    // 1. 生成 run_id
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let run_id = format!(
+        "{}-{}",
+        timestamp,
+        uuid::Uuid::new_v4().to_string()[..8].to_string()
+    );
 
-    let result = tokio::task::spawn_blocking(move || {
-        let repository = repo_clone.lock().unwrap();
+    // 2. 准备配置
+    let app_version = env!("CARGO_PKG_VERSION").to_string();
+    let algorithm_profile_id = "imagekeeper-v1-ssim".to_string();
 
-        // 解析对比模式
-        let compare_mode = match request.compare_mode.as_str() {
-            "within" => CompareMode::Within,
-            "between" => CompareMode::Between,
-            _ => return Err(crate::error::AppError::ValidationError(
-                "无效的对比模式".to_string()
-            )),
-        };
+    let baseline_alias = "A".to_string();
+    let comparison_aliases: Vec<String> = (0..request.comparison_paths.len())
+        .map(|i| format!("{}", (b'B' + i as u8) as char))
+        .collect();
 
-        // 创建扫描任务
-        let now = chrono::Utc::now().timestamp();
-        let root_path = request.folders.first()
-            .map(|f| f.path.clone())
-            .unwrap_or_default();
+    let internal_compare_paths: Vec<String> = request
+        .directory_options
+        .as_ref()
+        .map(|options| {
+            options
+                .iter()
+                .filter(|option| option.compare_within)
+                .map(|option| option.path.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let allow_internal_same_root = internal_compare_paths
+        .iter()
+        .any(|path| path == &request.baseline_path);
 
-        repository.conn().execute(
-            "INSERT INTO scans (root_path, status, compare_mode, created_at)
-             VALUES (?1, 'pending', ?2, ?3)",
-            rusqlite::params![root_path, compare_mode.as_str(), now],
+    // 默认配置（符合 IMAGE_COMPARISON_WORKFLOW.md 规范）
+    let config = RunConfig {
+        phash_max_distance: 10,
+        compressed_ssim_threshold: 0.995,
+        variant_review_lower_bound: 0.75,
+        aspect_ratio_tolerance: 0.005,
+        primary_match_tie_threshold: 0.001,
+        supported_formats: vec![
+            "jpg".to_string(),
+            "jpeg".to_string(),
+            "png".to_string(),
+            "gif".to_string(),
+            "bmp".to_string(),
+            "webp".to_string(),
+        ],
+        follow_symlinks: false,
+        exclude_patterns: Some(vec![
+            ".recycle".to_string(),
+            ".git".to_string(),
+            "node_modules".to_string(),
+        ]),
+        max_workers: num_cpus::get() as i32,
+    };
+
+    // 3. 创建运行记录
+    {
+        let repo_lock = repo.lock().unwrap();
+        repo_lock.create_run(
+            &run_id,
+            &app_version,
+            &algorithm_profile_id,
+            &request.baseline_path,
+            &baseline_alias,
+            &request.comparison_paths,
+            &comparison_aliases,
+            &config,
         )?;
-
-        let scan_id = repository.conn().last_insert_rowid();
-
-        // 创建文件夹记录
-        for folder_config in &request.folders {
-            let role = match folder_config.role.as_str() {
-                "baseline" => FolderRole::Baseline,
-                "compare" => FolderRole::Compare,
-                _ => return Err(crate::error::AppError::ValidationError(
-                    "无效的文件夹角色".to_string()
-                )),
-            };
-
-            repository.conn().execute(
-                "INSERT INTO folders (scan_id, path, role, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![scan_id, folder_config.path, role.as_str(), now],
-            )?;
-        }
-
-        // Phase 1: 扫描所有文件夹
-        let progress_callback = |event: ScanProgressEvent| {
-            window.emit("scan_progress", &event).ok();
-        };
-
-        scan_all_folders(scan_id, &request.folders, &repository, progress_callback)?;
-
-        // Phase 2: 计算哈希
-        let hash_callback = |event: HashProgressEvent| {
-            window.emit("hash_progress", &event).ok();
-        };
-        HashEngine::compute_hashes(scan_id, &repository, hash_callback)?;
-
-        // Phase 2: 识别完全重复
-        ComparisonEngine::identify_exact_duplicates(scan_id, &repository, compare_mode.clone())?;
-
-        // Phase 3: 计算 pHash
-        let phash_callback = |event: PHashProgressEvent| {
-            window.emit("phash_progress", &event).ok();
-        };
-        PHashEngine::compute_phashes(scan_id, &repository, phash_callback)?;
-
-        // Phase 3: pHash 快速筛选
-        let match_callback = |event: MatchProgressEvent| {
-            window.emit("match_progress", &event).ok();
-        };
-
-        let hamming_threshold = 10;
-        let candidates = ComparisonEngine::build_phash_candidates(
-            scan_id,
-            &repository,
-            compare_mode.clone(),
-            hamming_threshold,
-        )?;
-
-        // 保存候选配对
-        let now = chrono::Utc::now().timestamp();
-        for (id1, id2, distance) in &candidates {
-            // 获取图片信息计算大小比例
-            let (size1, size2, w1, h1, w2, h2): (i64, i64, u32, u32, u32, u32) = repository.conn().query_row(
-                "SELECT
-                    (SELECT file_size FROM images WHERE id = ?1),
-                    (SELECT file_size FROM images WHERE id = ?2),
-                    (SELECT width FROM images WHERE id = ?1),
-                    (SELECT height FROM images WHERE id = ?1),
-                    (SELECT width FROM images WHERE id = ?2),
-                    (SELECT height FROM images WHERE id = ?2)",
-                rusqlite::params![id1, id2],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-            )?;
-
-            let size_ratio = size2 as f64 / size1 as f64;
-            let resolution_ratio = (w2 * h2) as f64 / (w1 * h1) as f64;
-
-            repository.conn().execute(
-                "INSERT OR IGNORE INTO similar_pairs
-                 (larger_image_id, smaller_image_id, phash_distance, size_ratio, resolution_ratio, status, marked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
-                rusqlite::params![id1, id2, distance, size_ratio, resolution_ratio, now],
-            )?;
-        }
-
-        match_callback(MatchProgressEvent {
-            scan_id,
-            total_pairs: candidates.len() as u64,
-            processed_pairs: candidates.len() as u64,
-            current_phase: "pHash筛选完成".to_string(),
-        });
-
-        // Phase 4: 计算 SSIM 并分类
-        let settings = repository.load_settings()?;
-        ComparisonEngine::compute_ssim_and_classify(scan_id, &repository, settings.ssim_threshold)?;
-
-        // 更新状态为完成
-        repository.update_scan_status(scan_id, crate::db::models::ScanStatus::Completed)?;
-
-        repository.get_scan(scan_id)
-    }).await;
-
-    result.map_err(|e| crate::error::AppError::Other(e.to_string()))?
-}
-
-/// 扫描所有文件夹
-fn scan_all_folders<F>(
-    scan_id: i64,
-    folders: &[FolderConfig],
-    repository: &Repository,
-    progress_callback: F,
-) -> Result<()>
-where
-    F: Fn(ScanProgressEvent) + Send + Sync,
-{
-    let mut total_scanned = 0u64;
-
-    for folder_config in folders {
-        let folder_path = PathBuf::from(&folder_config.path);
-
-        // 获取 folder_id
-        let folder_id: i64 = repository.conn().query_row(
-            "SELECT id FROM folders WHERE scan_id = ?1 AND path = ?2",
-            rusqlite::params![scan_id, folder_config.path],
-            |row| row.get(0),
-        )?;
-
-        // 收集图片文件
-        let image_files = DirectoryWalker::collect_image_files(&folder_path)?;
-        let folder_file_count = image_files.len() as u64;
-
-        // 更新文件夹文件数
-        repository.conn().execute(
-            "UPDATE folders SET file_count = ?1 WHERE id = ?2",
-            rusqlite::params![folder_file_count, folder_id],
-        )?;
-
-        // 扫描并提取元数据
-        for file_path in &image_files {
-            let mut image = MetadataExtractor::extract(file_path, &folder_path, scan_id)?;
-            image.folder_id = Some(folder_id);
-
-            let image_id = repository.insert_image(&image)?;
-            total_scanned += 1;
-
-            progress_callback(ScanProgressEvent {
-                scan_id,
-                total_files: folder_file_count,
-                scanned_files: total_scanned,
-                current_file: file_path.to_string_lossy().to_string(),
-                estimated_time_remaining: None,
-            });
-        }
     }
 
-    // 更新扫描任务总文件数
-    repository.conn().execute(
-        "UPDATE scans SET total_files = ?1, scanned_files = ?1, status = 'running' WHERE id = ?2",
-        rusqlite::params![total_scanned, scan_id],
-    )?;
+    // 4. 启动后台任务执行工作流
+    let run_id_clone = run_id.clone();
+    let baseline_path = PathBuf::from(request.baseline_path);
+    let comparison_paths: Vec<PathBuf> = request
+        .comparison_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
 
-    Ok(())
+    let window_clone = window.clone();
+    let repo_clone_outer = Arc::clone(&repo);
+
+    tauri::async_runtime::spawn(async move {
+        use crate::core::workflow::{WorkflowEngine, WorkflowOptions};
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(100);
+
+        // 转发进度事件到前端
+        let window_clone_inner = window_clone.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                let _ = window_clone_inner.emit("scan-progress", &event);
+            }
+        });
+
+        // 执行工作流
+        let engine = WorkflowEngine::new(repo_clone_outer.clone());
+        let result = engine
+            .execute_comparison_with_options(
+                &run_id_clone,
+                baseline_path,
+                comparison_paths,
+                progress_tx,
+                WorkflowOptions {
+                    allow_internal_same_root,
+                },
+            )
+            .await;
+
+        // 处理结果
+        if let Err(e) = result {
+            eprintln!("工作流执行失败: {:?}", e);
+            let _ = {
+                let repo_lock = repo_clone_outer.lock().unwrap();
+                repo_lock.update_run_status(&run_id_clone, RunStatus::Failed)
+            };
+        }
+
+        // 发送完成事件
+        let _ = window_clone.emit("comparison-complete", &run_id_clone);
+    });
+
+    Ok(run_id)
 }
 
-/// 获取对比结果统计
+/// 获取对比统计
 #[tauri::command]
 pub async fn get_comparison_stats(
-    scan_id: i64,
+    run_id: String,
     repo: State<'_, Arc<Mutex<Repository>>>,
 ) -> Result<ComparisonStats> {
-    let repo = repo.lock().unwrap();
-
-    // 完全重复数量
-    let exact_duplicates: i64 = repo.conn().query_row(
-        "SELECT COUNT(*) FROM duplicates WHERE original_image_id IN (SELECT id FROM images WHERE scan_id = ?1)",
-        rusqlite::params![scan_id],
-        |row| row.get(0),
-    )?;
-
-    // 压缩版本数量
-    let compressed: i64 = repo.conn().query_row(
-        "SELECT COUNT(*) FROM similar_pairs WHERE larger_image_id IN (SELECT id FROM images WHERE scan_id = ?1)
-         AND similarity_type = 'compressed'",
-        rusqlite::params![scan_id],
-        |row| row.get(0),
-    )?;
-
-    // 差分图数量
-    let diff: i64 = repo.conn().query_row(
-        "SELECT COUNT(*) FROM similar_pairs WHERE larger_image_id IN (SELECT id FROM images WHERE scan_id = ?1)
-         AND similarity_type = 'diff'",
-        rusqlite::params![scan_id],
-        |row| row.get(0),
-    )?;
-
-    // 总图片数
-    let total_images: i64 = repo.conn().query_row(
-        "SELECT COUNT(*) FROM images WHERE scan_id = ?1",
-        rusqlite::params![scan_id],
-        |row| row.get(0),
-    )?;
-
-    Ok(ComparisonStats {
-        total_images: total_images as u64,
-        exact_duplicates: exact_duplicates as u64,
-        compressed_versions: compressed as u64,
-        diff_images: diff as u64,
-        unique_images: (total_images - exact_duplicates - compressed - diff) as u64,
-    })
+    let repo_lock = repo.lock().unwrap();
+    repo_lock.get_analysis_stats(&run_id)
 }
 
-#[derive(Debug, serde::Serialize)]
-pub struct ComparisonStats {
-    pub total_images: u64,
-    pub exact_duplicates: u64,
-    pub compressed_versions: u64,
-    pub diff_images: u64,
-    pub unique_images: u64,
+/// 获取分类结果列表
+#[tauri::command]
+pub async fn get_comparison_results(
+    run_id: String,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+) -> Result<Vec<ComparisonResultRow>> {
+    let repo_lock = repo.lock().unwrap();
+    read_comparison_results(&repo_lock, &run_id)
+}
+
+/// 获取 pHash 粗分组和组内 SSIM 决策信息
+#[tauri::command]
+pub async fn get_comparison_groups(
+    run_id: String,
+    grouping_distance: Option<i32>,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+) -> Result<Vec<ComparisonGroup>> {
+    let repo_lock = repo.lock().unwrap();
+    read_comparison_groups(&repo_lock, &run_id, grouping_distance)
+}
+
+/// 获取当前组内图片两两相似度，用于前端做“缩略图挂到最像原图”的交叉验证。
+#[tauri::command]
+pub async fn get_group_similarity_scores(
+    run_id: String,
+    image_ids: Vec<i64>,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+) -> Result<Vec<GroupSimilarityScore>> {
+    let images = {
+        let repo_lock = repo.lock().unwrap();
+        read_images_by_ids(&repo_lock, &run_id, &image_ids)?
+    };
+
+    Ok(compute_group_similarity_scores(&images))
+}
+
+/// 获取运行状态
+#[tauri::command]
+pub async fn get_run_status(
+    run_id: String,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+) -> Result<RunStatusResponse> {
+    let repo_lock = repo.lock().unwrap();
+    read_run_status(&repo_lock, &run_id)
+}
+
+/// 获取最近的对比历史
+#[tauri::command]
+pub async fn list_comparison_runs(
+    limit: Option<i64>,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+) -> Result<Vec<ComparisonRunHistoryItem>> {
+    let repo_lock = repo.lock().unwrap();
+    read_comparison_run_history(&repo_lock, limit.unwrap_or(20))
+}
+
+/// 删除历史任务数据库记录，不删除任何图片文件
+#[tauri::command]
+pub async fn delete_comparison_run(
+    run_id: String,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+) -> Result<()> {
+    let repo_lock = repo.lock().unwrap();
+    delete_comparison_run_records(&repo_lock, &run_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{repository::RunConfig, schema};
+    use rusqlite::Connection;
+
+    fn create_test_repo() -> Repository {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::initialize_database(&conn).unwrap();
+        let repo = Repository::new(conn);
+
+        repo.create_run(
+            "run-1",
+            "0.1.0",
+            "test-profile",
+            "D:/baseline",
+            "A",
+            &["D:/comparison".to_string()],
+            &["B".to_string()],
+            &RunConfig::default(),
+        )
+        .unwrap();
+
+        repo
+    }
+
+    #[test]
+    fn read_run_status_returns_terminal_status_for_existing_run() {
+        let repo = create_test_repo();
+        repo.update_run_status("run-1", RunStatus::AnalysisComplete)
+            .unwrap();
+
+        let response = read_run_status(&repo, "run-1").unwrap();
+
+        assert_eq!(response.run_id, "run-1");
+        assert_eq!(response.status, RunStatus::AnalysisComplete);
+        assert!(response.completed_at.is_some());
+    }
+
+    #[test]
+    fn read_run_status_errors_for_missing_run() {
+        let repo = create_test_repo();
+
+        let result = read_run_status(&repo, "missing-run");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_comparison_run_history_returns_recent_runs_with_summary() {
+        use crate::db::models::{AnalysisType, FolderRole};
+        use crate::db::repository::{AnalysisResultInsert, ImageInsert};
+
+        let repo = create_test_repo();
+        let baseline_folder = repo
+            .create_folder("run-1", "D:/baseline", "A", FolderRole::Baseline)
+            .unwrap();
+        let comparison_folder = repo
+            .create_folder("run-1", "D:/comparison", "B", FolderRole::Comparison)
+            .unwrap();
+
+        let baseline_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id: baseline_folder,
+                source_role: FolderRole::Baseline,
+                file_path: "D:/baseline/a.png".to_string(),
+                relative_path: "a.png".to_string(),
+                file_size: 100,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+        let comparison_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id: comparison_folder,
+                source_role: FolderRole::Comparison,
+                file_path: "D:/comparison/b.png".to_string(),
+                relative_path: "b.png".to_string(),
+                file_size: 90,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+
+        repo.update_image_hash(baseline_id, "hash-a", "phash-a", "phash-v1")
+            .unwrap();
+        repo.update_image_hash(comparison_id, "hash-b", "phash-b", "phash-v1")
+            .unwrap();
+        repo.insert_analysis_result(&AnalysisResultInsert {
+            run_id: "run-1".to_string(),
+            comparison_image_id: comparison_id,
+            analysis_type: AnalysisType::LikelyCompressed,
+            primary_match_image_id: Some(baseline_id),
+            all_candidate_ids: Some(vec![baseline_id]),
+            candidate_truncated: false,
+            phash_distance: Some(1),
+            ssim_score: Some(0.998),
+            size_ratio: Some(0.9),
+            resolution_ratio: Some(1.0),
+            aspect_diff: Some(0.0),
+            direction_smaller_resolution: false,
+            direction_smaller_filesize: true,
+            algorithm_profile_id: "test-profile".to_string(),
+            analysis_metadata: None,
+        })
+        .unwrap();
+        repo.update_run_status("run-1", RunStatus::AnalysisComplete)
+            .unwrap();
+
+        let history = read_comparison_run_history(&repo, 10).unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].run_id, "run-1");
+        assert_eq!(history[0].status, RunStatus::AnalysisComplete);
+        assert_eq!(history[0].baseline_root_path, "D:/baseline");
+        assert_eq!(
+            history[0].comparison_root_paths,
+            vec!["D:/comparison".to_string()]
+        );
+        assert_eq!(history[0].baseline_total, 1);
+        assert_eq!(history[0].comparison_total, 1);
+        assert_eq!(history[0].result_count, 1);
+        assert!(history[0].completed_at.is_some());
+    }
+
+    #[test]
+    fn delete_comparison_run_removes_database_rows_without_touching_file_path() {
+        use crate::db::models::{AnalysisType, FolderRole};
+        use crate::db::repository::{AnalysisResultInsert, ImageInsert};
+
+        let repo = create_test_repo();
+        let baseline_folder = repo
+            .create_folder("run-1", "D:/baseline", "A", FolderRole::Baseline)
+            .unwrap();
+        let comparison_folder = repo
+            .create_folder("run-1", "D:/comparison", "B", FolderRole::Comparison)
+            .unwrap();
+        let untouched_file = std::env::temp_dir().join(format!(
+            "imagekeeper-history-delete-{}.png",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&untouched_file, b"keep me").unwrap();
+
+        let baseline_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id: baseline_folder,
+                source_role: FolderRole::Baseline,
+                file_path: "D:/baseline/a.png".to_string(),
+                relative_path: "a.png".to_string(),
+                file_size: 100,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+        let comparison_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id: comparison_folder,
+                source_role: FolderRole::Comparison,
+                file_path: untouched_file.to_string_lossy().to_string(),
+                relative_path: "b.png".to_string(),
+                file_size: 90,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+
+        repo.update_image_hash(baseline_id, "hash-a", "phash-a", "phash-v1")
+            .unwrap();
+        repo.update_image_hash(comparison_id, "hash-b", "phash-b", "phash-v1")
+            .unwrap();
+        repo.insert_analysis_result(&AnalysisResultInsert {
+            run_id: "run-1".to_string(),
+            comparison_image_id: comparison_id,
+            analysis_type: AnalysisType::LikelyCompressed,
+            primary_match_image_id: Some(baseline_id),
+            all_candidate_ids: Some(vec![baseline_id]),
+            candidate_truncated: false,
+            phash_distance: Some(1),
+            ssim_score: Some(0.998),
+            size_ratio: Some(0.9),
+            resolution_ratio: Some(1.0),
+            aspect_diff: Some(0.0),
+            direction_smaller_resolution: false,
+            direction_smaller_filesize: true,
+            algorithm_profile_id: "test-profile".to_string(),
+            analysis_metadata: None,
+        })
+        .unwrap();
+
+        delete_comparison_run_records(&repo, "run-1").unwrap();
+
+        for table in ["runs", "folders", "images", "analysis_results"] {
+            let count: i64 = repo
+                .conn()
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE run_id = ?1"),
+                    ["run-1"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table} 应删除 run-1 的数据库记录");
+        }
+        assert!(untouched_file.exists(), "删除历史任务不能删除真实图片文件");
+        std::fs::remove_file(untouched_file).unwrap();
+    }
+
+    #[test]
+    fn read_comparison_results_returns_rows_with_image_paths() {
+        use crate::db::models::{AnalysisType, FolderRole};
+        use crate::db::repository::{AnalysisResultInsert, ImageInsert};
+
+        let repo = create_test_repo();
+        let baseline_folder = repo
+            .create_folder("run-1", "D:/baseline", "A", FolderRole::Baseline)
+            .unwrap();
+        let comparison_folder = repo
+            .create_folder("run-1", "D:/comparison", "B", FolderRole::Comparison)
+            .unwrap();
+
+        let baseline_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id: baseline_folder,
+                source_role: FolderRole::Baseline,
+                file_path: "D:/baseline/a.png".to_string(),
+                relative_path: "a.png".to_string(),
+                file_size: 100,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+        let comparison_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id: comparison_folder,
+                source_role: FolderRole::Comparison,
+                file_path: "D:/comparison/b.png".to_string(),
+                relative_path: "b.png".to_string(),
+                file_size: 90,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+
+        repo.update_image_hash(baseline_id, "hash-a", "phash-a", "phash-v1")
+            .unwrap();
+        repo.update_image_hash(comparison_id, "hash-b", "phash-b", "phash-v1")
+            .unwrap();
+
+        repo.insert_analysis_result(&AnalysisResultInsert {
+            run_id: "run-1".to_string(),
+            comparison_image_id: comparison_id,
+            analysis_type: AnalysisType::Inconclusive,
+            primary_match_image_id: Some(baseline_id),
+            all_candidate_ids: Some(vec![baseline_id]),
+            candidate_truncated: false,
+            phash_distance: Some(2),
+            ssim_score: Some(0.99),
+            size_ratio: Some(0.9),
+            resolution_ratio: Some(1.0),
+            aspect_diff: Some(0.0),
+            direction_smaller_resolution: false,
+            direction_smaller_filesize: true,
+            algorithm_profile_id: "test-profile".to_string(),
+            analysis_metadata: None,
+        })
+        .unwrap();
+
+        let rows = read_comparison_results(&repo, "run-1").unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].analysis_type, AnalysisType::Inconclusive);
+        assert_eq!(rows[0].comparison_path, "D:/comparison/b.png");
+        assert_eq!(
+            rows[0].primary_match_path.as_deref(),
+            Some("D:/baseline/a.png")
+        );
+        assert_eq!(rows[0].comparison_relative_path, "b.png");
+    }
+
+    #[test]
+    fn read_comparison_groups_connects_transitive_phash_matches() {
+        use crate::db::models::FolderRole;
+        use crate::db::repository::ImageInsert;
+
+        let repo = create_test_repo();
+        let folder_id = repo
+            .create_folder("run-1", "D:/baseline", "A", FolderRole::Baseline)
+            .unwrap();
+
+        let image_specs = [
+            ("D:/baseline/a.png", "a.png", "0000000000000000"),
+            ("D:/baseline/b.png", "b.png", "0000000000000001"),
+            ("D:/baseline/c.png", "c.png", "0000000000000003"),
+            ("D:/baseline/d.png", "d.png", "ffffffffffffffff"),
+        ];
+
+        for (idx, (file_path, relative_path, phash)) in image_specs.iter().enumerate() {
+            let image_id = repo
+                .insert_image(&ImageInsert {
+                    run_id: "run-1".to_string(),
+                    folder_id,
+                    source_role: FolderRole::Baseline,
+                    file_path: file_path.to_string(),
+                    relative_path: relative_path.to_string(),
+                    file_size: 100 + idx as i64,
+                    file_modified_at: 0,
+                    width: 10,
+                    height: 10,
+                    format: "png".to_string(),
+                    aspect_ratio: 1.0,
+                    frame_count: 1,
+                    frame_strategy: "first".to_string(),
+                })
+                .unwrap();
+
+            repo.update_image_hash(image_id, &format!("hash-{idx}"), phash, "phash-v1")
+                .unwrap();
+        }
+
+        let groups = read_comparison_groups(&repo, "run-1", None).unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].member_count, 3);
+        assert_eq!(
+            groups[0]
+                .members
+                .iter()
+                .map(|member| member.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.png", "b.png", "c.png"]
+        );
+        assert_eq!(groups[1].member_count, 1);
+        assert_eq!(groups[1].members[0].relative_path, "d.png");
+    }
+
+    #[test]
+    fn read_comparison_groups_uses_optional_grouping_distance() {
+        use crate::db::models::FolderRole;
+        use crate::db::repository::ImageInsert;
+
+        let repo = create_test_repo();
+        let folder_id = repo
+            .create_folder("run-1", "D:/baseline", "A", FolderRole::Baseline)
+            .unwrap();
+
+        let image_specs = [
+            ("D:/baseline/a.png", "a.png", "0000000000000000"),
+            ("D:/baseline/b.png", "b.png", "0000000000000001"),
+        ];
+
+        for (idx, (file_path, relative_path, phash)) in image_specs.iter().enumerate() {
+            let image_id = repo
+                .insert_image(&ImageInsert {
+                    run_id: "run-1".to_string(),
+                    folder_id,
+                    source_role: FolderRole::Baseline,
+                    file_path: file_path.to_string(),
+                    relative_path: relative_path.to_string(),
+                    file_size: 100 + idx as i64,
+                    file_modified_at: 0,
+                    width: 10,
+                    height: 10,
+                    format: "png".to_string(),
+                    aspect_ratio: 1.0,
+                    frame_count: 1,
+                    frame_strategy: "first".to_string(),
+                })
+                .unwrap();
+
+            repo.update_image_hash(image_id, &format!("hash-{idx}"), phash, "phash-v1")
+                .unwrap();
+        }
+
+        let default_groups = read_comparison_groups(&repo, "run-1", None).unwrap();
+        let strict_groups = read_comparison_groups(&repo, "run-1", Some(0)).unwrap();
+
+        assert_eq!(default_groups.len(), 1);
+        assert_eq!(default_groups[0].member_count, 2);
+        assert_eq!(strict_groups.len(), 2);
+        assert_eq!(strict_groups[0].member_count, 1);
+        assert_eq!(strict_groups[1].member_count, 1);
+    }
 }

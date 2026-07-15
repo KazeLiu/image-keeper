@@ -1,7 +1,9 @@
+pub mod comparison;
+pub mod directory;
+pub mod recycle;
+pub mod report;
 pub mod scan;
 pub mod settings;
-pub mod directory;
-pub mod comparison;
 
 // TODO: 后续添加其他命令模块
 // pub mod hash;

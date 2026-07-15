@@ -65,7 +65,9 @@ ImageKeeper/
 ├── src/                      # Vue 前端源码
 │   ├── components/           # Vue 组件
 │   │   ├── DirectoryTree.vue      # 目录树
-│   │   ├── ScanProgress.vue       # 扫描进度
+│   │   ├── ComparisonDirectorySelector.vue # 多目录选择
+│   │   ├── ComparisonProgress.vue # 对比进度与统计
+│   │   ├── ComparisonResults.vue  # 对比结果
 │   │   ├── ImageGrid.vue          # 图片网格
 │   │   └── ImagePreview.vue       # 图片预览
 │   ├── stores/               # Pinia 状态管理
@@ -74,7 +76,7 @@ ImageKeeper/
 │   │   ├── settingsStore.ts      # 用户设置
 │   │   └── deleteStore.ts        # 删除管理
 │   ├── views/                # 页面视图
-│   │   ├── MainView.vue          # 主界面
+│   │   ├── MainView.vue          # 标准首页（多目录对比工作台）
 │   │   ├── SettingsView.vue      # 设置页面
 │   │   └── ExportView.vue        # 导出页面
 │   ├── types/                # TypeScript 类型定义

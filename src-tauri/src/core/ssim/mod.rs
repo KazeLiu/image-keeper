@@ -1,14 +1,19 @@
-pub mod resize;
 pub mod compute;
+pub mod resize;
 
-use crate::error::Result;
 use crate::db::repository::Repository;
+use crate::error::Result;
 use std::path::Path;
 
 /// SSIM 引擎
 pub struct SsimEngine;
 
 impl SsimEngine {
+    /// 计算两张图片的 SSIM
+    pub fn compute_ssim(path1: &Path, path2: &Path) -> Result<f64> {
+        compute::SsimComputer::compute_from_files(path1, path2)
+    }
+
     /// 为候选配对计算 SSIM
     pub fn compute_ssim_for_pairs(
         scan_id: i64,
@@ -37,7 +42,6 @@ impl SsimEngine {
                  WHERE id = ?5",
                 rusqlite::params![ssim_score, if is_compressed { 1 } else { 0 }, ssim_threshold, now, pair_id],
             )?;
-
         }
 
         Ok(())

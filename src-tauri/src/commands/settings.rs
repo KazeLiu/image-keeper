@@ -1,14 +1,12 @@
-use tauri::State;
-use std::sync::{Arc, Mutex};
-use crate::error::Result;
-use crate::db::repository::Repository;
 use crate::db::models::Settings;
+use crate::db::repository::Repository;
+use crate::error::Result;
+use std::sync::{Arc, Mutex};
+use tauri::State;
 
 /// 加载用户设置
 #[tauri::command]
-pub async fn load_settings(
-    repo: State<'_, Arc<Mutex<Repository>>>,
-) -> Result<Settings> {
+pub async fn load_settings(repo: State<'_, Arc<Mutex<Repository>>>) -> Result<Settings> {
     let repo = repo.lock().unwrap();
     repo.load_settings()
 }

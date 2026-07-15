@@ -1,10 +1,10 @@
 pub mod models;
-pub mod schema;
 pub mod repository;
+pub mod schema;
 
+use crate::error::Result;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use crate::error::Result;
 
 /// 获取数据库路径
 pub fn get_database_path() -> Result<PathBuf> {
