@@ -10,7 +10,7 @@
         type="primary"
         plain
         size="small"
-        :disabled="!store.orderedSelectedMatches.length"
+        :disabled="store.isRunning || !store.orderedSelectedMatches.length"
         @click="quickRename"
       >
         按首项快速编号
@@ -107,10 +107,10 @@
           <span v-if="blockingCount" class="summary-error">· {{ blockingCount }} 个冲突</span>
         </div>
         <div class="operation-actions">
-          <el-button :disabled="busy" @click="copySelected">复制到…</el-button>
-          <el-button :disabled="busy" @click="moveSelected">新建文件夹并移动</el-button>
-          <el-button v-if="lastBatch?.reversible" :disabled="busy" @click="undoLast">撤销上次操作</el-button>
-          <el-button type="primary" :loading="busy" :disabled="blockingCount > 0" @click="executeRename">执行重命名</el-button>
+          <el-button :disabled="busy || store.isRunning" @click="copySelected">复制到…</el-button>
+          <el-button :disabled="busy || store.isRunning" @click="moveSelected">新建文件夹并移动</el-button>
+          <el-button v-if="lastBatch?.reversible" :disabled="busy || store.isRunning" @click="undoLast">撤销上次操作</el-button>
+          <el-button type="primary" :loading="busy" :disabled="store.isRunning || blockingCount > 0" @click="executeRename">执行重命名</el-button>
         </div>
       </div>
     </template>
@@ -132,6 +132,7 @@ import {
   executeDifferenceRename,
   moveDifferenceFiles,
   previewDifferenceExplicitRename,
+  previewDifferenceTransfer,
   undoDifferenceBatch,
   type OperationBatchResult,
   type RenamePreviewItem,
@@ -141,7 +142,7 @@ import { useDifferenceFinderStore } from '@/stores/differenceFinderStore'
 
 const store = useDifferenceFinderStore()
 const ruleMode = ref<'simple' | 'advanced'>('simple')
-const simpleTemplate = ref('$ref-$n:02.$ext')
+const simpleTemplate = ref('$name.$ext')
 const oldPattern = ref('*_*.png')
 const advancedTemplate = ref('$2-$1.png')
 const editableNames = ref<Record<string, string>>({})
@@ -149,6 +150,9 @@ const manualPreview = ref<RenamePreviewItem[]>([])
 const dragStart = ref<number | null>(null)
 const busy = ref(false)
 const lastBatch = ref<OperationBatchResult | null>(null)
+const hasAppliedRule = ref(false)
+const manualOverrides = ref<Set<string>>(new Set())
+const appliedRule = ref<RenameRule>({ mode: 'simple', template: '$name.$ext' })
 let validationTimer: number | null = null
 
 const variables = [
@@ -161,9 +165,35 @@ const displayRows = computed(() => manualPreview.value.length ? manualPreview.va
 const blockingCount = computed(() => displayRows.value.filter(item => item.blocking).length)
 
 watch(() => store.renamePreview, rows => {
-  editableNames.value = Object.fromEntries(rows.map(item => [item.sourcePath, item.proposedName]))
+  editableNames.value = Object.fromEntries(rows.map(item => [
+    item.sourcePath,
+    manualOverrides.value.has(normalizePath(item.sourcePath))
+      ? editableNames.value[item.sourcePath] ?? item.proposedName
+      : item.proposedName
+  ]))
   manualPreview.value = rows
 }, { deep: true })
+
+watch(
+  () => store.orderedSelectedMatches
+    .map(item => item.filePath.replace(/\//g, '\\').toLowerCase())
+    .sort()
+    .join('|'),
+  async signature => {
+    if (!signature) {
+      hasAppliedRule.value = false
+      store.renamePreview = []
+      manualPreview.value = []
+      editableNames.value = {}
+      manualOverrides.value = new Set()
+      return
+    }
+    await store.generateRenamePreview(
+      hasAppliedRule.value ? appliedRule.value : { mode: 'simple', template: '$name.$ext' }
+    )
+  },
+  { immediate: true }
+)
 
 function currentRule(): RenameRule {
   return ruleMode.value === 'simple'
@@ -172,19 +202,26 @@ function currentRule(): RenameRule {
 }
 
 async function applyCurrentRule() {
-  await store.generateRenamePreview(currentRule())
+  hasAppliedRule.value = true
+  manualOverrides.value = new Set()
+  appliedRule.value = currentRule()
+  await store.generateRenamePreview(appliedRule.value)
 }
 
 async function quickRename() {
   const first = displayRows.value[0]
   const firstName = first ? (editableNames.value[first.sourcePath] || first.proposedName) : store.orderedSelectedMatches[0]?.fileName
   if (!firstName) return
-  await store.generateRenamePreview({ mode: 'quick', firstName })
+  hasAppliedRule.value = true
+  manualOverrides.value = new Set()
+  appliedRule.value = { mode: 'quick', firstName }
+  await store.generateRenamePreview(appliedRule.value)
 }
 
 function insertVariable(token: string) { simpleTemplate.value += token }
 
 function updateName(path: string, value: string | number) {
+  manualOverrides.value = new Set(manualOverrides.value).add(normalizePath(path))
   editableNames.value = { ...editableNames.value, [path]: String(value) }
   if (validationTimer !== null) window.clearTimeout(validationTimer)
   validationTimer = window.setTimeout(validateManualNames, 220)
@@ -194,7 +231,8 @@ async function validateManualNames() {
   if (!displayRows.value.length) return []
   manualPreview.value = await previewDifferenceExplicitRename(displayRows.value.map(item => ({
     sourcePath: item.sourcePath,
-    newName: editableNames.value[item.sourcePath] ?? item.proposedName
+    newName: editableNames.value[item.sourcePath] ?? item.proposedName,
+    expectedFingerprint: fingerprintFor(item.sourcePath)
   })))
   return manualPreview.value
 }
@@ -203,16 +241,23 @@ async function dropAt(index: number) {
   if (dragStart.value === null || dragStart.value === index) return
   store.reorderSelected(dragStart.value, index)
   dragStart.value = null
-  await applyCurrentRule()
+  await refreshAppliedRule()
 }
 
 async function moveRow(from: number, to: number) {
   store.reorderSelected(from, to)
-  await applyCurrentRule()
+  await refreshAppliedRule()
 }
 
 async function executeRename() {
   const preview = await validateManualNames()
+  const previewSources = preview.map(item => normalizePath(item.sourcePath)).sort()
+  const selectedSources = store.orderedSelectedMatches.map(item => normalizePath(item.filePath)).sort()
+  if (previewSources.join('|') !== selectedSources.join('|')) {
+    ElMessage.error('选择内容已变化，请重新生成重命名预览')
+    await refreshAppliedRule()
+    return
+  }
   if (preview.some(item => item.blocking)) {
     ElMessage.error('请先处理标红的文件名冲突')
     return
@@ -224,11 +269,15 @@ async function executeRename() {
   )
   busy.value = true
   try {
-    const batch = await executeDifferenceRename(preview.map(item => ({ sourcePath: item.sourcePath, newName: editableNames.value[item.sourcePath] || item.proposedName })))
+    const batch = await executeDifferenceRename(preview.map(item => ({
+      sourcePath: item.sourcePath,
+      newName: editableNames.value[item.sourcePath] || item.proposedName,
+      expectedFingerprint: fingerprintFor(item.sourcePath)
+    })))
     lastBatch.value = batch
     store.applyOperationPaths(batch.entries)
     ElMessage.success(`重命名完成：${batch.succeeded} 个成功`)
-    await applyCurrentRule()
+    await refreshAppliedRule()
   } finally { busy.value = false }
 }
 
@@ -237,24 +286,52 @@ async function moveSelected() {
   if (!parent || Array.isArray(parent)) return
   const { value } = await ElMessageBox.prompt('输入要创建的文件夹名称', '新建文件夹并移动', {
     inputPlaceholder: '例如：三月七差分图',
-    inputValidator: value => Boolean(value.trim()) || '请输入文件夹名称'
+    inputValidator: value => {
+      const name = value.trim()
+      if (!name) return '请输入文件夹名称'
+      if (/[<>:"/\\|?*]/.test(name) || /[ .]$/.test(name)) return '文件夹名称包含 Windows 不允许的字符'
+      return true
+    }
   })
+  const destination = `${parent.replace(/[\\/]$/, '')}\\${value.trim()}`
+  const request = { files: selectedTransferFiles(), targetDirectory: parent, newFolderName: value.trim() }
+  const preview = await previewDifferenceTransfer(request)
+  if (preview.items.some(item => item.issues.some(issue => ['source_missing', 'source_changed'].includes(issue.kind)))) {
+    ElMessage.error('部分文件在搜索后已变化，请重新搜索后再移动')
+    return
+  }
+  await ElMessageBox.confirm(
+    transferConfirmation('移动', preview.destination || destination, preview.conflictCount, preview.items.map(item => item.targetPath)),
+    '确认新建文件夹并移动',
+    { confirmButtonText: '确认移动', cancelButtonText: '取消', type: 'warning' }
+  )
   busy.value = true
   try {
-    const batch = await moveDifferenceFiles({ paths: store.orderedSelectedMatches.map(item => item.filePath), targetDirectory: parent, newFolderName: value.trim() })
+    const batch = await moveDifferenceFiles(request)
     lastBatch.value = batch
     store.applyOperationPaths(batch.entries)
     ElMessage.success(`移动完成：${batch.succeeded} 个成功，${batch.skipped} 个跳过`)
-    await applyCurrentRule()
+    await refreshAppliedRule()
   } finally { busy.value = false }
 }
 
 async function copySelected() {
   const target = await open({ directory: true, multiple: false, title: '选择复制目标目录' })
   if (!target || Array.isArray(target)) return
+  const request = { files: selectedTransferFiles(), targetDirectory: target }
+  const preview = await previewDifferenceTransfer(request)
+  if (preview.items.some(item => item.issues.some(issue => ['source_missing', 'source_changed'].includes(issue.kind)))) {
+    ElMessage.error('部分文件在搜索后已变化，请重新搜索后再复制')
+    return
+  }
+  await ElMessageBox.confirm(
+    transferConfirmation('复制', preview.destination, preview.conflictCount, preview.items.map(item => item.targetPath)),
+    '确认批量复制',
+    { confirmButtonText: '确认复制', cancelButtonText: '取消', type: 'warning' }
+  )
   busy.value = true
   try {
-    const batch = await copyDifferenceFiles({ paths: store.orderedSelectedMatches.map(item => item.filePath), targetDirectory: target })
+    const batch = await copyDifferenceFiles(request)
     ElMessage.success(`复制完成：${batch.succeeded} 个成功，${batch.skipped} 个跳过`)
   } finally { busy.value = false }
 }
@@ -267,8 +344,37 @@ async function undoLast() {
     store.applyOperationPaths(batch.entries)
     lastBatch.value = null
     ElMessage.success(`已撤销 ${batch.succeeded} 个文件操作`)
-    await applyCurrentRule()
+    await refreshAppliedRule()
   } finally { busy.value = false }
+}
+
+function fingerprintFor(path: string) {
+  const match = store.matches.find(item => normalizePath(item.filePath) === normalizePath(path))
+  if (!match) throw new Error(`找不到文件的搜索指纹: ${path}`)
+  return { blake3Hash: match.blake3Hash, fileSize: match.fileSize, modifiedAt: match.modifiedAt }
+}
+
+function selectedTransferFiles() {
+  return store.orderedSelectedMatches.map(item => ({
+    sourcePath: item.filePath,
+    expectedFingerprint: fingerprintFor(item.filePath)
+  }))
+}
+
+function normalizePath(path: string) {
+  return path.replace(/\//g, '\\').toLowerCase()
+}
+
+async function refreshAppliedRule() {
+  await store.generateRenamePreview(
+    hasAppliedRule.value ? appliedRule.value : { mode: 'simple', template: '$name.$ext' }
+  )
+}
+
+function transferConfirmation(action: string, destination: string, conflicts: number, targets: string[]) {
+  const examples = targets.slice(0, 3).join('；')
+  const remaining = Math.max(0, targets.length - 3)
+  return `将${action} ${targets.length} 个文件到 ${destination}。检测到 ${conflicts} 个冲突（会安全跳过）。目标示例：${examples}${remaining ? `；另有 ${remaining} 个` : ''}`
 }
 </script>
 

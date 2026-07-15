@@ -2,6 +2,8 @@ use crate::core::image_features::compute_blake3;
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -27,6 +29,7 @@ pub struct RenameInput {
     pub reference_name: String,
     pub group_index: usize,
     pub order: usize,
+    pub expected_fingerprint: Option<FileFingerprint>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +37,23 @@ pub struct RenameInput {
 pub struct RenameExecutionItem {
     pub source_path: String,
     pub new_name: String,
+    pub expected_fingerprint: Option<FileFingerprint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferInput {
+    pub source_path: String,
+    pub expected_fingerprint: Option<FileFingerprint>,
+}
+
+impl TransferInput {
+    pub fn new(path: &Path) -> Self {
+        Self {
+            source_path: path.to_string_lossy().to_string(),
+            expected_fingerprint: fingerprint(path).ok(),
+        }
+    }
 }
 
 impl RenameExecutionItem {
@@ -41,6 +61,7 @@ impl RenameExecutionItem {
         Self {
             source_path: path.to_string_lossy().to_string(),
             new_name: new_name.to_string(),
+            expected_fingerprint: fingerprint(path).ok(),
         }
     }
 }
@@ -54,6 +75,7 @@ pub enum FilePlanIssueKind {
     SameContentExists,
     RuleUnmatched,
     SourceMissing,
+    SourceChanged,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +97,23 @@ pub struct RenamePreviewItem {
     pub blocking: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferPreviewItem {
+    pub source_path: String,
+    pub target_path: String,
+    pub issues: Vec<FilePlanIssue>,
+    pub conflict: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferPreview {
+    pub destination: String,
+    pub items: Vec<TransferPreviewItem>,
+    pub conflict_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
@@ -92,7 +131,7 @@ pub enum OperationEntryStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileFingerprint {
     pub blake3_hash: String,
@@ -108,6 +147,7 @@ pub struct OperationEntry {
     pub status: OperationEntryStatus,
     pub message: Option<String>,
     pub original_fingerprint: Option<FileFingerprint>,
+    pub target_fingerprint: Option<FileFingerprint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +225,7 @@ pub fn preview_rename(items: &[RenameInput], rule: &RenameRule) -> Vec<RenamePre
         explicit.push(RenameExecutionItem {
             source_path: item.source_path.clone(),
             new_name: proposed_name,
+            expected_fingerprint: item.expected_fingerprint.clone(),
         });
     }
 
@@ -239,6 +280,23 @@ pub fn preview_explicit_names(items: &[RenameExecutionItem]) -> Vec<RenamePrevie
                 issues.push(blocking_issue(
                     FilePlanIssueKind::SourceMissing,
                     "源文件不存在或已被移动",
+                ));
+            } else if let Some(expected) = &item.expected_fingerprint {
+                match fingerprint(source) {
+                    Ok(actual) if actual != *expected => issues.push(blocking_issue(
+                        FilePlanIssueKind::SourceChanged,
+                        "文件在搜索后发生变化，请重新搜索后再操作",
+                    )),
+                    Err(error) => issues.push(blocking_issue(
+                        FilePlanIssueKind::SourceChanged,
+                        &format!("无法复核文件状态: {error}"),
+                    )),
+                    Ok(_) => {}
+                }
+            } else {
+                issues.push(blocking_issue(
+                    FilePlanIssueKind::SourceChanged,
+                    "缺少搜索时的文件指纹，请重新搜索后再操作",
                 ));
             }
             if let Some(message) = invalid_file_name_reason(&item.new_name) {
@@ -296,6 +354,68 @@ pub fn quick_rename_names(first_name: &str, extensions: &[&str]) -> Vec<String> 
         .collect()
 }
 
+pub fn preview_transfer(items: &[TransferInput], target_directory: &Path) -> TransferPreview {
+    let preview_items = items
+        .iter()
+        .map(|item| {
+            let source = Path::new(&item.source_path);
+            let target = target_directory.join(source.file_name().unwrap_or_default());
+            let mut issues = Vec::new();
+            if !source.is_file() {
+                issues.push(blocking_issue(
+                    FilePlanIssueKind::SourceMissing,
+                    "源文件不存在或已被移动",
+                ));
+            } else {
+                match (&item.expected_fingerprint, fingerprint(source)) {
+                    (Some(expected), Ok(actual)) if *expected == actual => {}
+                    (Some(_), Ok(_)) => issues.push(blocking_issue(
+                        FilePlanIssueKind::SourceChanged,
+                        "文件在搜索后发生变化，请重新搜索后再操作",
+                    )),
+                    (_, Err(error)) => issues.push(blocking_issue(
+                        FilePlanIssueKind::SourceChanged,
+                        &format!("无法复核文件状态: {error}"),
+                    )),
+                    (None, Ok(_)) => issues.push(blocking_issue(
+                        FilePlanIssueKind::SourceChanged,
+                        "缺少搜索时的文件指纹，请重新搜索后再操作",
+                    )),
+                }
+            }
+            if target.exists() {
+                let same_content = source.is_file()
+                    && target.is_file()
+                    && compute_blake3(source).ok() == compute_blake3(&target).ok();
+                issues.push(blocking_issue(
+                    if same_content {
+                        FilePlanIssueKind::SameContentExists
+                    } else {
+                        FilePlanIssueKind::TargetExists
+                    },
+                    if same_content {
+                        "目标位置已有相同内容"
+                    } else {
+                        "目标位置已有同名文件"
+                    },
+                ));
+            }
+            TransferPreviewItem {
+                source_path: item.source_path.clone(),
+                target_path: target.to_string_lossy().to_string(),
+                conflict: !issues.is_empty(),
+                issues,
+            }
+        })
+        .collect::<Vec<_>>();
+    let conflict_count = preview_items.iter().filter(|item| item.conflict).count();
+    TransferPreview {
+        destination: target_directory.to_string_lossy().to_string(),
+        items: preview_items,
+        conflict_count,
+    }
+}
+
 pub fn execute_rename(items: &[RenameExecutionItem]) -> Result<OperationBatchResult> {
     let preview = preview_explicit_names(items);
     if preview.iter().any(|item| item.blocking) {
@@ -305,9 +425,7 @@ pub fn execute_rename(items: &[RenameExecutionItem]) -> Result<OperationBatchRes
     }
     let mappings: Vec<_> = preview
         .iter()
-        .filter(|item| {
-            normalize_path_key(&item.source_path) != normalize_path_key(&item.target_path)
-        })
+        .filter(|item| item.source_path != item.target_path)
         .map(|item| {
             (
                 PathBuf::from(&item.source_path),
@@ -336,19 +454,26 @@ pub fn execute_rename(items: &[RenameExecutionItem]) -> Result<OperationBatchRes
             target_path: target.to_string_lossy().to_string(),
             status: OperationEntryStatus::Succeeded,
             message: None,
+            target_fingerprint: fingerprint(&target).ok(),
         })
         .collect::<Vec<_>>();
     Ok(batch_result(OperationKind::Rename, entries, true))
 }
 
-pub fn execute_move(paths: &[String], target_directory: &Path) -> Result<OperationBatchResult> {
+pub fn execute_move(
+    items: &[TransferInput],
+    target_directory: &Path,
+) -> Result<OperationBatchResult> {
     std::fs::create_dir_all(target_directory)?;
-    execute_transfer(paths, target_directory, OperationKind::Move)
+    execute_transfer(items, target_directory, OperationKind::Move)
 }
 
-pub fn execute_copy(paths: &[String], target_directory: &Path) -> Result<OperationBatchResult> {
+pub fn execute_copy(
+    items: &[TransferInput],
+    target_directory: &Path,
+) -> Result<OperationBatchResult> {
     std::fs::create_dir_all(target_directory)?;
-    execute_transfer(paths, target_directory, OperationKind::Copy)
+    execute_transfer(items, target_directory, OperationKind::Copy)
 }
 
 pub fn undo_operation_batch(batch: &OperationBatchResult) -> Result<OperationBatchResult> {
@@ -362,11 +487,11 @@ pub fn undo_operation_batch(batch: &OperationBatchResult) -> Result<OperationBat
         .map(|entry| {
             let current = PathBuf::from(&entry.target_path);
             let expected = entry
-                .original_fingerprint
+                .target_fingerprint
                 .as_ref()
                 .ok_or_else(|| AppError::ValidationError("撤销记录缺少文件指纹".to_string()))?;
             let actual = fingerprint(&current)?;
-            if actual.blake3_hash != expected.blake3_hash {
+            if actual != *expected {
                 return Err(AppError::ValidationError(format!(
                     "文件内容已变化，无法撤销: {}",
                     entry.target_path
@@ -384,19 +509,20 @@ pub fn undo_operation_batch(batch: &OperationBatchResult) -> Result<OperationBat
             status: OperationEntryStatus::Succeeded,
             message: None,
             original_fingerprint: fingerprint(&target).ok(),
+            target_fingerprint: fingerprint(&target).ok(),
         })
         .collect();
     Ok(batch_result(OperationKind::Undo, entries, false))
 }
 
 fn execute_transfer(
-    paths: &[String],
+    items: &[TransferInput],
     target_directory: &Path,
     kind: OperationKind,
 ) -> Result<OperationBatchResult> {
-    let mut entries = Vec::with_capacity(paths.len());
-    for source_path in paths {
-        let source = Path::new(source_path);
+    let mut entries = Vec::with_capacity(items.len());
+    for item in items {
+        let source = Path::new(&item.source_path);
         let target = target_directory.join(source.file_name().unwrap_or_default());
         if !source.is_file() {
             entries.push(outcome(
@@ -409,6 +535,16 @@ fn execute_transfer(
             continue;
         }
         let before = fingerprint(source)?;
+        if item.expected_fingerprint.as_ref() != Some(&before) {
+            entries.push(outcome(
+                source,
+                &target,
+                OperationEntryStatus::Failed,
+                "文件在搜索后发生变化，请重新搜索后再操作",
+                Some(before),
+            ));
+            continue;
+        }
         if target.exists() {
             let message = if compute_blake3(source).ok() == compute_blake3(&target).ok() {
                 "目标位置已有相同内容"
@@ -454,78 +590,191 @@ fn execute_path_mapping(mappings: &[(PathBuf, PathBuf)]) -> Result<()> {
     if mappings.is_empty() {
         return Ok(());
     }
+
+    match perform_two_phase_mapping(mappings) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            let original_error = failure.error.to_string();
+            let recovery: Vec<_> = failure
+                .current_locations
+                .into_iter()
+                .zip(mappings.iter())
+                .filter_map(|(current, (original, _))| {
+                    (current != *original).then(|| (current, original.clone()))
+                })
+                .collect();
+
+            if recovery.is_empty() {
+                return Err(failure.error);
+            }
+
+            match perform_two_phase_mapping(&recovery) {
+                Ok(()) => Err(failure.error),
+                Err(recovery_failure) => {
+                    let manual_recovery = recovery_failure
+                        .current_locations
+                        .iter()
+                        .zip(recovery.iter())
+                        .filter(|(current, (_, original))| *current != original)
+                        .map(|(current, (_, original))| {
+                            format!("{} -> {}", current.display(), original.display())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    Err(AppError::FileSystem(format!(
+                        "文件映射失败: {original_error}；自动恢复失败: {}。请按以下路径手工恢复: {manual_recovery}",
+                        recovery_failure.error
+                    )))
+                }
+            }
+        }
+    }
+}
+
+struct MappingFailure {
+    error: AppError,
+    current_locations: Vec<PathBuf>,
+}
+
+fn perform_two_phase_mapping(
+    mappings: &[(PathBuf, PathBuf)],
+) -> std::result::Result<(), MappingFailure> {
+    let mut current_locations = mappings
+        .iter()
+        .map(|(source, _)| source.clone())
+        .collect::<Vec<_>>();
+
     for (source, target) in mappings {
         if !source.is_file() {
-            return Err(AppError::ValidationError(format!(
-                "源文件不存在: {}",
-                source.display()
-            )));
+            return Err(MappingFailure {
+                error: AppError::ValidationError(format!("源文件不存在: {}", source.display())),
+                current_locations,
+            });
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                return Err(MappingFailure {
+                    error: error.into(),
+                    current_locations,
+                });
+            }
         }
     }
 
-    let mut staged: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::new();
-    for (source, target) in mappings {
+    let mut staged = Vec::with_capacity(mappings.len());
+    for (index, (source, target)) in mappings.iter().enumerate() {
         let temporary =
             source.with_file_name(format!(".imagekeeper-{}.tmp", Uuid::new_v4().simple()));
         if let Err(error) = move_file_safely(source, &temporary) {
-            for (original, temporary, _) in staged.iter().rev() {
-                let _ = move_file_safely(temporary, original);
-            }
-            return Err(error);
+            return Err(MappingFailure {
+                error,
+                current_locations,
+            });
         }
-        staged.push((source.clone(), temporary, target.clone()));
+        current_locations[index] = temporary.clone();
+        staged.push((temporary, target.clone()));
     }
 
-    let mut completed = 0;
-    for (_, temporary, target) in &staged {
+    for (index, (temporary, target)) in staged.iter().enumerate() {
         if let Err(error) = move_file_safely(temporary, target) {
-            for (original, _, completed_target) in staged[..completed].iter().rev() {
-                let _ = move_file_safely(completed_target, original);
-            }
-            for (original, remaining_temporary, _) in staged[completed..].iter().rev() {
-                if remaining_temporary.exists() {
-                    let _ = move_file_safely(remaining_temporary, original);
-                }
-            }
-            return Err(error);
+            return Err(MappingFailure {
+                error,
+                current_locations,
+            });
         }
-        completed += 1;
+        current_locations[index] = target.clone();
     }
     Ok(())
 }
 
 fn move_file_safely(source: &Path, target: &Path) -> Result<()> {
-    if target.exists() {
-        return Err(AppError::ValidationError(format!(
-            "目标文件已存在: {}",
-            target.display()
-        )));
-    }
-    if std::fs::rename(source, target).is_ok() {
+    if source == target {
         return Ok(());
     }
+    match std::fs::hard_link(source, target) {
+        Ok(()) => {
+            if let Err(error) = std::fs::remove_file(source) {
+                let cleanup_error = std::fs::remove_file(target).err();
+                return Err(AppError::FileSystem(match cleanup_error {
+                    Some(cleanup) => {
+                        format!("删除移动源文件失败: {error}；清理目标文件也失败: {cleanup}")
+                    }
+                    None => format!("删除移动源文件失败: {error}"),
+                }));
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(AppError::ValidationError(format!(
+                "目标文件已存在: {}",
+                target.display()
+            )));
+        }
+        Err(_) => {}
+    }
+
     copy_file_verified(source, target)?;
     if let Err(error) = std::fs::remove_file(source) {
-        let _ = std::fs::remove_file(target);
-        return Err(AppError::FileSystem(format!("删除移动源文件失败: {error}")));
+        let cleanup_error = std::fs::remove_file(target).err();
+        return Err(AppError::FileSystem(match cleanup_error {
+            Some(cleanup) => {
+                format!("删除移动源文件失败: {error}；清理目标文件也失败: {cleanup}")
+            }
+            None => format!("删除移动源文件失败: {error}"),
+        }));
     }
     Ok(())
 }
 
 fn copy_file_verified(source: &Path, target: &Path) -> Result<()> {
-    if target.exists() {
-        return Err(AppError::ValidationError(format!(
-            "目标文件已存在: {}",
-            target.display()
-        )));
-    }
-    std::fs::copy(source, target)?;
-    if compute_blake3(source)? != compute_blake3(target)? {
-        let _ = std::fs::remove_file(target);
-        return Err(AppError::FileSystem("复制后文件校验失败".to_string()));
+    let before = fingerprint(source)?;
+    let mut source_file = std::fs::File::open(source)?;
+    let mut target_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                AppError::ValidationError(format!("目标文件已存在: {}", target.display()))
+            } else {
+                error.into()
+            }
+        })?;
+
+    let copy_result = (|| -> Result<()> {
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = source_file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            target_file.write_all(&buffer[..read])?;
+        }
+        target_file.sync_all()?;
+
+        let after = fingerprint(source)?;
+        let copied = fingerprint(target)?;
+        if before.blake3_hash != after.blake3_hash
+            || before.file_size != after.file_size
+            || copied.blake3_hash != before.blake3_hash
+            || copied.file_size != before.file_size
+        {
+            return Err(AppError::FileSystem(
+                "复制期间源文件发生变化，或复制后校验失败".to_string(),
+            ));
+        }
+        Ok(())
+    })();
+    drop(target_file);
+
+    if let Err(error) = copy_result {
+        let cleanup_error = std::fs::remove_file(target).err();
+        return Err(match cleanup_error {
+            Some(cleanup) => {
+                AppError::FileSystem(format!("{error}；清理未完成的目标文件失败: {cleanup}"))
+            }
+            None => error,
+        });
     }
     Ok(())
 }
@@ -699,6 +948,9 @@ fn outcome(
         status,
         message: (!message.is_empty()).then(|| message.to_string()),
         original_fingerprint,
+        target_fingerprint: (status == OperationEntryStatus::Succeeded)
+            .then(|| fingerprint(target).ok())
+            .flatten(),
     }
 }
 
@@ -712,6 +964,7 @@ mod tests {
             reference_name: "三月七".to_string(),
             group_index: 1,
             order,
+            expected_fingerprint: fingerprint(path).ok(),
         }
     }
 
@@ -775,6 +1028,123 @@ mod tests {
         assert_eq!(batch.succeeded, 2);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn supports_case_only_rename_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("lower.png");
+        std::fs::write(&source, b"A").unwrap();
+
+        let batch = execute_rename(&[RenameExecutionItem::new(&source, "LOWER.png")]).unwrap();
+        let actual_name = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+
+        assert_eq!(batch.succeeded, 1);
+        assert_eq!(actual_name, "LOWER.png");
+    }
+
+    #[test]
+    fn restores_every_source_when_final_mapping_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        let b = dir.path().join("b.png");
+        let c = dir.path().join("c.png");
+        let blocked_target = dir.path().join("blocked.png");
+        std::fs::write(&a, b"A").unwrap();
+        std::fs::write(&b, b"B").unwrap();
+        std::fs::write(&c, b"C").unwrap();
+        std::fs::create_dir(&blocked_target).unwrap();
+
+        let result = execute_path_mapping(&[
+            (a.clone(), b.clone()),
+            (b.clone(), c.clone()),
+            (c.clone(), blocked_target),
+        ]);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&a).unwrap(), b"A");
+        assert_eq!(std::fs::read(&b).unwrap(), b"B");
+        assert_eq!(std::fs::read(&c).unwrap(), b"C");
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".imagekeeper-"))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn blocks_rename_when_source_changed_after_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("changed.png");
+        std::fs::write(&source, b"before").unwrap();
+        let expected = fingerprint(&source).unwrap();
+        std::fs::write(&source, b"after").unwrap();
+
+        let preview = preview_explicit_names(&[RenameExecutionItem {
+            source_path: source.to_string_lossy().to_string(),
+            new_name: "renamed.png".to_string(),
+            expected_fingerprint: Some(expected),
+        }]);
+
+        assert!(preview[0].blocking);
+        assert!(preview[0]
+            .issues
+            .iter()
+            .any(|issue| issue.kind == FilePlanIssueKind::SourceChanged));
+    }
+
+    #[test]
+    fn blocks_copy_when_source_changed_after_search() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("changed.png");
+        std::fs::write(&source, b"before").unwrap();
+        let expected = fingerprint(&source).unwrap();
+        std::fs::write(&source, b"after").unwrap();
+
+        let batch = execute_copy(
+            &[TransferInput {
+                source_path: source.to_string_lossy().to_string(),
+                expected_fingerprint: Some(expected),
+            }],
+            target_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(batch.failed, 1);
+        assert!(!target_dir.path().join("changed.png").exists());
+    }
+
+    #[test]
+    fn transfer_preview_lists_targets_and_conflicts() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("same.png");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(target_dir.path().join("same.png"), b"existing").unwrap();
+
+        let preview = preview_transfer(&[TransferInput::new(&source)], target_dir.path());
+
+        assert_eq!(preview.items.len(), 1);
+        assert_eq!(preview.conflict_count, 1);
+        assert_eq!(
+            Path::new(&preview.items[0].target_path),
+            target_dir.path().join("same.png")
+        );
+    }
+
     #[test]
     fn blocks_duplicate_generated_names_case_insensitively() {
         let dir = tempfile::tempdir().unwrap();
@@ -824,7 +1194,7 @@ mod tests {
         let source = source_dir.join("a.png");
         std::fs::write(&source, b"A").unwrap();
 
-        let moved = execute_move(&[source.to_string_lossy().to_string()], &target_dir).unwrap();
+        let moved = execute_move(&[TransferInput::new(&source)], &target_dir).unwrap();
         assert!(target_dir.join("a.png").exists());
 
         let undone = undo_operation_batch(&moved).unwrap();
@@ -845,7 +1215,7 @@ mod tests {
         std::fs::write(&source, b"A").unwrap();
         std::fs::write(&target, b"A").unwrap();
 
-        let copied = execute_copy(&[source.to_string_lossy().to_string()], &target_dir).unwrap();
+        let copied = execute_copy(&[TransferInput::new(&source)], &target_dir).unwrap();
 
         assert_eq!(copied.skipped, 1);
         assert_eq!(copied.failed, 0);

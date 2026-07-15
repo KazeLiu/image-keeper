@@ -9,6 +9,7 @@ import {
   type DifferenceReferenceInput,
   type DifferenceSearchProgress,
   type MatchClassification,
+  type OperationEntry,
   type RenamePreviewItem,
   type RenameRule,
   type SearchFileError
@@ -39,7 +40,7 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
       relation => relation.referenceId === activeReferenceId.value
     )
     const classificationMatches = classificationFilter.value === 'all'
-      || item.classification === classificationFilter.value
+      || classificationForItem(item) === classificationFilter.value
     return referenceMatches && classificationMatches
   }))
 
@@ -84,10 +85,13 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     isRunning.value = true
     errors.value = []
     progress.value = null
-    const unlisten = await listenDifferenceSearchProgress(value => {
-      if (value.sessionId === sessionId) progress.value = value
-    })
+    selectedPaths.value = []
+    renamePreview.value = []
+    let unlisten: (() => void) | null = null
     try {
+      unlisten = await listenDifferenceSearchProgress(value => {
+        if (value.sessionId === sessionId) progress.value = value
+      })
       const result = await startDifferenceSearch({
         sessionId,
         references: references.value.map(({ id, path }) => ({ id, path })),
@@ -100,7 +104,7 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
       orderedPaths.value = result.matches.map(item => item.filePath)
       renamePreview.value = []
     } finally {
-      unlisten()
+      unlisten?.()
       isRunning.value = false
     }
   }
@@ -146,12 +150,19 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     isPreviewing.value = true
     try {
       renamePreview.value = await previewDifferenceRename(
-        orderedSelectedMatches.value.map((item, index) => ({
-          sourcePath: item.filePath,
-          referenceName: referenceStem(item.bestReferenceId),
-          groupIndex: Math.max(1, references.value.findIndex(ref => ref.id === item.bestReferenceId) + 1),
-          order: index + 1
-        })),
+        orderedSelectedMatches.value.map((item, index) => {
+          const referenceId = activeReferenceId.value
+            && item.relations.some(relation => relation.referenceId === activeReferenceId.value)
+            ? activeReferenceId.value
+            : item.bestReferenceId
+          return {
+            sourcePath: item.filePath,
+            referenceName: referenceStem(referenceId),
+            groupIndex: Math.max(1, references.value.findIndex(ref => ref.id === referenceId) + 1),
+            order: index + 1,
+            expectedFingerprint: fingerprintOf(item)
+          }
+        }),
         rule
       )
     } finally {
@@ -164,21 +175,34 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     return name.replace(/\.[^.]+$/, '')
   }
 
-  function applyOperationPaths(entries: Array<{ sourcePath: string; targetPath: string; status: string }>) {
+  function classificationForItem(item: DifferenceMatchItem): MatchClassification {
+    if (!activeReferenceId.value) return item.classification
+    return item.relations.find(relation => relation.referenceId === activeReferenceId.value)?.classification
+      || item.classification
+  }
+
+  function applyOperationPaths(entries: OperationEntry[]) {
     const changed = new Map(
       entries
         .filter(entry => entry.status === 'succeeded')
-        .map(entry => [normalizePath(entry.sourcePath), entry.targetPath])
+        .map(entry => [normalizePath(entry.sourcePath), entry])
     )
     if (changed.size === 0) return
     matches.value = matches.value.map(item => {
-      const targetPath = changed.get(normalizePath(item.filePath))
-      return targetPath
-        ? { ...item, filePath: targetPath, fileName: fileName(targetPath) }
+      const entry = changed.get(normalizePath(item.filePath))
+      return entry
+        ? {
+            ...item,
+            filePath: entry.targetPath,
+            fileName: fileName(entry.targetPath),
+            blake3Hash: entry.targetFingerprint?.blake3Hash || item.blake3Hash,
+            fileSize: entry.targetFingerprint?.fileSize ?? item.fileSize,
+            modifiedAt: entry.targetFingerprint?.modifiedAt ?? item.modifiedAt
+          }
         : item
     })
-    selectedPaths.value = selectedPaths.value.map(path => changed.get(normalizePath(path)) || path)
-    orderedPaths.value = orderedPaths.value.map(path => changed.get(normalizePath(path)) || path)
+    selectedPaths.value = selectedPaths.value.map(path => changed.get(normalizePath(path))?.targetPath || path)
+    orderedPaths.value = orderedPaths.value.map(path => changed.get(normalizePath(path))?.targetPath || path)
   }
 
   return {
@@ -210,6 +234,7 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     reorderSelected,
     generateRenamePreview,
     referenceStem,
+    classificationForItem,
     applyOperationPaths
   }
 })
@@ -220,4 +245,12 @@ function normalizePath(path: string) {
 
 function fileName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path
+}
+
+function fingerprintOf(item: DifferenceMatchItem) {
+  return {
+    blake3Hash: item.blake3Hash,
+    fileSize: item.fileSize,
+    modifiedAt: item.modifiedAt
+  }
 }

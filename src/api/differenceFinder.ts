@@ -72,6 +72,12 @@ export interface DifferenceSearchProgress {
   currentFile?: string | null
 }
 
+export interface FileFingerprint {
+  blake3Hash: string
+  fileSize: number
+  modifiedAt: number
+}
+
 export type RenameRule =
   | { mode: 'simple'; template: string }
   | { mode: 'advanced'; oldPattern: string; newTemplate: string }
@@ -82,11 +88,13 @@ export interface RenameInput {
   referenceName: string
   groupIndex: number
   order: number
+  expectedFingerprint: FileFingerprint
 }
 
 export interface RenameExecutionItem {
   sourcePath: string
   newName: string
+  expectedFingerprint: FileFingerprint
 }
 
 export type FilePlanIssueKind =
@@ -96,6 +104,7 @@ export type FilePlanIssueKind =
   | 'same_content_exists'
   | 'rule_unmatched'
   | 'source_missing'
+  | 'source_changed'
 
 export interface FilePlanIssue {
   kind: FilePlanIssueKind
@@ -117,6 +126,7 @@ export interface OperationEntry {
   targetPath: string
   status: 'succeeded' | 'skipped' | 'failed'
   message?: string | null
+  targetFingerprint?: FileFingerprint | null
 }
 
 export interface OperationBatchResult {
@@ -130,9 +140,27 @@ export interface OperationBatchResult {
 }
 
 export interface TransferFilesRequest {
-  paths: string[]
+  files: TransferInput[]
   targetDirectory: string
   newFolderName?: string | null
+}
+
+export interface TransferInput {
+  sourcePath: string
+  expectedFingerprint: FileFingerprint
+}
+
+export interface TransferPreviewItem {
+  sourcePath: string
+  targetPath: string
+  issues: FilePlanIssue[]
+  conflict: boolean
+}
+
+export interface TransferPreview {
+  destination: string
+  items: TransferPreviewItem[]
+  conflictCount: number
 }
 
 export function startDifferenceSearch(request: DifferenceSearchRequest) {
@@ -161,6 +189,10 @@ export function previewDifferenceExplicitRename(items: RenameExecutionItem[]) {
 
 export function moveDifferenceFiles(request: TransferFilesRequest) {
   return invoke<OperationBatchResult>('move_difference_files', { request })
+}
+
+export function previewDifferenceTransfer(request: TransferFilesRequest) {
+  return invoke<TransferPreview>('preview_difference_transfer', { request })
 }
 
 export function copyDifferenceFiles(request: TransferFilesRequest) {

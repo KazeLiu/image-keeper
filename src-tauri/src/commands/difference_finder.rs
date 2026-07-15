@@ -3,11 +3,11 @@ use crate::core::difference_finder::{
 };
 use crate::core::file_operations::{
     execute_copy, execute_move, execute_rename, preview_explicit_names, preview_rename,
-    undo_operation_batch, OperationBatchResult, RenameExecutionItem, RenameInput,
-    RenamePreviewItem, RenameRule,
+    preview_transfer, undo_operation_batch, OperationBatchResult, RenameExecutionItem, RenameInput,
+    RenamePreviewItem, RenameRule, TransferInput, TransferPreview,
 };
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Component, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State, Window};
@@ -15,7 +15,8 @@ use tauri::{Emitter, State, Window};
 #[derive(Default)]
 pub struct DifferenceFinderState {
     cancelled_sessions: Mutex<HashSet<String>>,
-    batches: Mutex<HashMap<String, OperationBatchResult>>,
+    latest_reversible_batch: Mutex<Option<OperationBatchResult>>,
+    file_operation: Mutex<()>,
 }
 
 impl DifferenceFinderState {
@@ -39,20 +40,35 @@ impl DifferenceFinderState {
     }
 
     fn store_batch(&self, batch: OperationBatchResult) -> Result<(), String> {
-        self.batches
-            .lock()
-            .map_err(|_| "文件操作状态锁已损坏".to_string())?
-            .insert(batch.batch_id.clone(), batch);
+        if batch.reversible {
+            *self
+                .latest_reversible_batch
+                .lock()
+                .map_err(|_| "文件操作状态锁已损坏".to_string())? = Some(batch);
+        }
         Ok(())
     }
 
     fn get_batch(&self, batch_id: &str) -> Result<OperationBatchResult, String> {
-        self.batches
+        self.latest_reversible_batch
             .lock()
             .map_err(|_| "文件操作状态锁已损坏".to_string())?
-            .get(batch_id)
+            .as_ref()
+            .filter(|batch| batch.batch_id == batch_id)
             .cloned()
             .ok_or_else(|| "找不到可撤销的操作批次".to_string())
+    }
+
+    fn consume_batch(&self, batch_id: &str) -> Result<(), String> {
+        let mut latest = self
+            .latest_reversible_batch
+            .lock()
+            .map_err(|_| "文件操作状态锁已损坏".to_string())?;
+        if latest.as_ref().map(|batch| batch.batch_id.as_str()) != Some(batch_id) {
+            return Err("找不到可撤销的操作批次".to_string());
+        }
+        latest.take();
+        Ok(())
     }
 }
 
@@ -72,7 +88,7 @@ pub struct RenameExecuteRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferFilesRequest {
-    pub paths: Vec<String>,
+    pub files: Vec<TransferInput>,
     pub target_directory: String,
     pub new_folder_name: Option<String>,
 }
@@ -126,10 +142,22 @@ pub fn preview_difference_explicit_rename(
 }
 
 #[tauri::command]
+pub fn preview_difference_transfer(
+    request: TransferFilesRequest,
+) -> Result<TransferPreview, String> {
+    let destination = resolve_destination(&request)?;
+    Ok(preview_transfer(&request.files, &destination))
+}
+
+#[tauri::command]
 pub fn execute_difference_rename(
     request: RenameExecuteRequest,
     state: State<'_, Arc<DifferenceFinderState>>,
 ) -> Result<OperationBatchResult, String> {
+    let _operation_guard = state
+        .file_operation
+        .lock()
+        .map_err(|_| "文件操作状态锁已损坏".to_string())?;
     let batch = execute_rename(&request.items).map_err(|error| error.to_string())?;
     state.store_batch(batch.clone())?;
     Ok(batch)
@@ -140,8 +168,12 @@ pub fn move_difference_files(
     request: TransferFilesRequest,
     state: State<'_, Arc<DifferenceFinderState>>,
 ) -> Result<OperationBatchResult, String> {
+    let _operation_guard = state
+        .file_operation
+        .lock()
+        .map_err(|_| "文件操作状态锁已损坏".to_string())?;
     let destination = resolve_destination(&request)?;
-    let batch = execute_move(&request.paths, &destination).map_err(|error| error.to_string())?;
+    let batch = execute_move(&request.files, &destination).map_err(|error| error.to_string())?;
     state.store_batch(batch.clone())?;
     Ok(batch)
 }
@@ -151,8 +183,12 @@ pub fn copy_difference_files(
     request: TransferFilesRequest,
     state: State<'_, Arc<DifferenceFinderState>>,
 ) -> Result<OperationBatchResult, String> {
+    let _operation_guard = state
+        .file_operation
+        .lock()
+        .map_err(|_| "文件操作状态锁已损坏".to_string())?;
     let destination = resolve_destination(&request)?;
-    let batch = execute_copy(&request.paths, &destination).map_err(|error| error.to_string())?;
+    let batch = execute_copy(&request.files, &destination).map_err(|error| error.to_string())?;
     state.store_batch(batch.clone())?;
     Ok(batch)
 }
@@ -162,8 +198,14 @@ pub fn undo_difference_batch(
     batch_id: String,
     state: State<'_, Arc<DifferenceFinderState>>,
 ) -> Result<OperationBatchResult, String> {
+    let _operation_guard = state
+        .file_operation
+        .lock()
+        .map_err(|_| "文件操作状态锁已损坏".to_string())?;
     let original = state.get_batch(&batch_id)?;
-    undo_operation_batch(&original).map_err(|error| error.to_string())
+    let result = undo_operation_batch(&original).map_err(|error| error.to_string())?;
+    state.consume_batch(&batch_id)?;
+    Ok(result)
 }
 
 fn resolve_destination(request: &TransferFilesRequest) -> Result<PathBuf, String> {
@@ -174,6 +216,9 @@ fn resolve_destination(request: &TransferFilesRequest) -> Result<PathBuf, String
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
+        if invalid_folder_name(name) {
+            return Err("新文件夹名称包含 Windows 不允许的字符或保留名称".to_string());
+        }
         let relative = PathBuf::from(name);
         if relative.components().count() != 1
             || !matches!(relative.components().next(), Some(Component::Normal(_)))
@@ -185,9 +230,42 @@ fn resolve_destination(request: &TransferFilesRequest) -> Result<PathBuf, String
     Ok(destination)
 }
 
+fn invalid_folder_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.ends_with([' ', '.'])
+        || name
+            .chars()
+            .any(|ch| ch < ' ' || r#"<>:"/\|?*"#.contains(ch))
+    {
+        return true;
+    }
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (base.len() == 4
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && matches!(base.as_bytes()[3], b'1'..=b'9'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::file_operations::OperationKind;
+
+    fn reversible_batch(id: &str) -> OperationBatchResult {
+        OperationBatchResult {
+            batch_id: id.to_string(),
+            kind: OperationKind::Rename,
+            entries: Vec::new(),
+            succeeded: 1,
+            skipped: 0,
+            failed: 0,
+            reversible: true,
+        }
+    }
 
     #[test]
     fn cancellation_is_scoped_to_one_session() {
@@ -199,5 +277,29 @@ mod tests {
 
         state.begin_session("session-a");
         assert!(!state.is_cancelled("session-a"));
+    }
+
+    #[test]
+    fn only_latest_reversible_batch_can_be_consumed_once() {
+        let state = DifferenceFinderState::default();
+        state.store_batch(reversible_batch("older")).unwrap();
+        state.store_batch(reversible_batch("latest")).unwrap();
+
+        assert!(state.get_batch("older").is_err());
+        assert_eq!(state.get_batch("latest").unwrap().batch_id, "latest");
+        state.consume_batch("latest").unwrap();
+        assert!(state.get_batch("latest").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_windows_folder_names() {
+        for name in ["CON", "folder.", "bad:name"] {
+            let request = TransferFilesRequest {
+                files: Vec::new(),
+                target_directory: "C:\\target".to_string(),
+                new_folder_name: Some(name.to_string()),
+            };
+            assert!(resolve_destination(&request).is_err(), "accepted {name}");
+        }
     }
 }
