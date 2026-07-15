@@ -164,6 +164,23 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     return name.replace(/\.[^.]+$/, '')
   }
 
+  function applyOperationPaths(entries: Array<{ sourcePath: string; targetPath: string; status: string }>) {
+    const changed = new Map(
+      entries
+        .filter(entry => entry.status === 'succeeded')
+        .map(entry => [normalizePath(entry.sourcePath), entry.targetPath])
+    )
+    if (changed.size === 0) return
+    matches.value = matches.value.map(item => {
+      const targetPath = changed.get(normalizePath(item.filePath))
+      return targetPath
+        ? { ...item, filePath: targetPath, fileName: fileName(targetPath) }
+        : item
+    })
+    selectedPaths.value = selectedPaths.value.map(path => changed.get(normalizePath(path)) || path)
+    orderedPaths.value = orderedPaths.value.map(path => changed.get(normalizePath(path)) || path)
+  }
+
   return {
     references,
     targetRoots,
@@ -192,7 +209,8 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     clearSelection,
     reorderSelected,
     generateRenamePreview,
-    referenceStem
+    referenceStem,
+    applyOperationPaths
   }
 })
 

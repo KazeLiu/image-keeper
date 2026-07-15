@@ -2,8 +2,9 @@ use crate::core::difference_finder::{
     search_difference_images, DifferenceSearchRequest, DifferenceSearchResponse,
 };
 use crate::core::file_operations::{
-    execute_copy, execute_move, execute_rename, preview_rename, undo_operation_batch,
-    OperationBatchResult, RenameExecutionItem, RenameInput, RenamePreviewItem, RenameRule,
+    execute_copy, execute_move, execute_rename, preview_explicit_names, preview_rename,
+    undo_operation_batch, OperationBatchResult, RenameExecutionItem, RenameInput,
+    RenamePreviewItem, RenameRule,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -115,6 +116,13 @@ pub fn preview_difference_rename(
     request: RenamePreviewRequest,
 ) -> Result<Vec<RenamePreviewItem>, String> {
     Ok(preview_rename(&request.items, &request.rule))
+}
+
+#[tauri::command]
+pub fn preview_difference_explicit_rename(
+    request: RenameExecuteRequest,
+) -> Result<Vec<RenamePreviewItem>, String> {
+    Ok(preview_explicit_names(&request.items))
 }
 
 #[tauri::command]

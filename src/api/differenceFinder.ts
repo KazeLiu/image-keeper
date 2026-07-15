@@ -153,6 +153,12 @@ export function executeDifferenceRename(items: RenameExecutionItem[]) {
   return invoke<OperationBatchResult>('execute_difference_rename', { request: { items } })
 }
 
+export function previewDifferenceExplicitRename(items: RenameExecutionItem[]) {
+  return invoke<RenamePreviewItem[]>('preview_difference_explicit_rename', {
+    request: { items }
+  })
+}
+
 export function moveDifferenceFiles(request: TransferFilesRequest) {
   return invoke<OperationBatchResult>('move_difference_files', { request })
 }

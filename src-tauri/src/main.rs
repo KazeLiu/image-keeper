@@ -33,6 +33,7 @@ fn main() {
             commands::difference_finder::start_difference_search,
             commands::difference_finder::cancel_difference_search,
             commands::difference_finder::preview_difference_rename,
+            commands::difference_finder::preview_difference_explicit_rename,
             commands::difference_finder::execute_difference_rename,
             commands::difference_finder::move_difference_files,
             commands::difference_finder::copy_difference_files,
