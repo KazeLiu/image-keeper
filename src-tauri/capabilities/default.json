@@ -8,6 +8,7 @@
     "core:window:default",
     "core:app:default",
     "core:event:default",
+    "core:webview:allow-create-webview-window",
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:allow-read-dir",

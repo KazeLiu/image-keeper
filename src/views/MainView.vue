@@ -19,6 +19,17 @@
         </button>
       </div>
 
+      <button type="button" class="tool-card" @click="openDifferenceFinder">
+        <span class="tool-card-icon" aria-hidden="true">
+          <el-icon><Search /></el-icon>
+        </span>
+        <span class="tool-card-content">
+          <span class="tool-card-title">找差分图</span>
+          <span class="tool-card-copy">用多张参考图，从多个目录查找差分、重复与相关组图</span>
+        </span>
+        <span class="tool-card-action">打开独立窗口</span>
+      </button>
+
       <section v-if="activeScreen === 'history'" class="history-panel">
         <div class="history-header">
           <div>
@@ -131,7 +142,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Delete, Expand, FolderOpened, Fold, Plus, Refresh } from '@element-plus/icons-vue'
+import { ArrowLeft, Delete, Expand, FolderOpened, Fold, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import ComparisonDirectorySelector from '@/components/ComparisonDirectorySelector.vue'
 import ComparisonProgress from '@/components/ComparisonProgress.vue'
 import ComparisonResults from '@/components/ComparisonResults.vue'
@@ -252,6 +264,30 @@ function startNewTask() {
   comparisonStore.clearCurrentRunView()
   activeScreen.value = 'workspace'
   handleWindowResize()
+}
+
+async function openDifferenceFinder() {
+  try {
+    const existing = await WebviewWindow.getByLabel('difference-finder')
+    if (existing) {
+      await existing.show()
+      await existing.setFocus()
+      return
+    }
+
+    new WebviewWindow('difference-finder', {
+      url: '/difference-finder',
+      title: 'ImageKeeper - 找差分图',
+      width: 1280,
+      height: 820,
+      minWidth: 980,
+      minHeight: 680,
+      center: true,
+      resizable: true
+    })
+  } catch (error: any) {
+    ElMessage.error(error?.message || String(error) || '无法打开找差分图窗口')
+  }
 }
 
 async function showHistory() {
@@ -540,6 +576,72 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
+.tool-card {
+  width: 100%;
+  min-height: 88px;
+  margin-top: 20px;
+  padding: 16px 20px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #303133;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.tool-card:hover {
+  border-color: #409eff;
+  box-shadow: 0 8px 22px rgba(64, 158, 255, 0.12);
+}
+
+.tool-card:focus-visible {
+  outline: 2px solid #409eff;
+  outline-offset: 3px;
+}
+
+.tool-card-icon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ecf5ff;
+  color: #409eff;
+  font-size: 24px;
+}
+
+.tool-card-content {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tool-card-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.tool-card-copy,
+.tool-card-action {
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.tool-card-action {
+  flex: 0 0 auto;
+  color: #409eff;
+  font-weight: 600;
+}
+
 .history-panel {
   min-height: 0;
   margin-top: 24px;
@@ -776,6 +878,10 @@ onBeforeUnmount(() => {
 
   .task-card {
     min-height: 190px;
+  }
+
+  .tool-card-action {
+    display: none;
   }
 
   .history-header {

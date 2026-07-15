@@ -16,6 +16,11 @@ const routes: RouteRecordRaw[] = [
     path: '/export',
     name: 'Export',
     component: () => import('@/views/ExportView.vue')
+  },
+  {
+    path: '/difference-finder',
+    name: 'DifferenceFinder',
+    component: () => import('@/views/DifferenceFinderView.vue')
   }
 ]
 
