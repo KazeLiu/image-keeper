@@ -7,6 +7,13 @@
             <div class="header-title">第 {{ group.group_index }} 组</div>
             <div class="threshold-summary">
               差分 {{ formatQualityPercent(originalRecognitionThreshold) }} · 低质量 {{ formatQualityPercent(store.qualitySelectionThreshold) }}
+              ·
+              <span
+                class="precision-summary"
+                :class="useHighPrecisionSimilarity ? 'is-high' : 'is-fast'"
+              >
+                {{ useHighPrecisionSimilarity ? '高精度' : '低精度' }}
+              </span>
             </div>
           </div>
           <div class="detail-actions">
@@ -61,6 +68,22 @@
                   />
                   <div class="quality-help">
                     自动根据相似度勾选低质量的图片；
+                  </div>
+                </div>
+
+                <div class="quality-control-card">
+                  <div class="quality-heading">
+                    <span>相似度对比精度</span>
+                    <el-switch
+                      :model-value="useHighPrecisionSimilarity"
+                      size="small"
+                      active-text="高精度"
+                      inactive-text="低精度"
+                      @change="handlePrecisionModeChange"
+                    />
+                  </div>
+                  <div class="quality-help">
+                    低精度速度更快，适合大批量图片；高精度会保留颜色信息重新判断，相似度更细，但等待时间会明显变长。
                   </div>
                 </div>
               </div>
@@ -122,9 +145,28 @@
         </div>
       </div>
 
+      <div
+        v-if="!isLoadingCrossCheck && hiddenOriginalRowCount > 0"
+        class="detail-filter-bar"
+      >
+        <span>已隐藏 {{ hiddenOriginalRowCount }} 张暂无低质量候选的原图</span>
+        <el-switch
+          v-model="showEmptyOriginalRows"
+          size="small"
+          active-text="显示无候选原图"
+        />
+      </div>
+
+      <el-empty
+        v-if="!isLoadingCrossCheck && visibleOriginalRows.length === 0"
+        class="no-candidate-empty"
+        description="本组暂无可删除候选"
+        :image-size="72"
+      />
+
       <el-table
-        v-else
-        :data="originalRows"
+        v-else-if="!isLoadingCrossCheck"
+        :data="visibleOriginalRows"
         row-key="id"
         height="100%"
         class="detail-table"
@@ -165,14 +207,29 @@
                 <el-table-column label="图片" min-width="180">
                   <template #default="{ row: candidate }">
                     <div class="image-cell">
-                      <img
-                        class="thumb small"
-                        :class="{ active: candidate.member.image_id === store.selectedMemberId }"
-                        :src="getImageUrl(candidate.member.file_path)"
-                        :alt="candidate.member.relative_path"
-                        loading="lazy"
-                        @click.stop="openImageViewer(candidate.member.image_id)"
-                      />
+                      <el-tooltip
+                        placement="right-start"
+                        :show-after="200"
+                        popper-class="detail-image-preview-tooltip"
+                      >
+                        <template #content>
+                          <div class="detail-image-preview-tooltip-content">
+                            <img
+                              class="detail-image-preview-large"
+                              :src="getImageUrl(candidate.member.file_path)"
+                              :alt="candidate.member.relative_path"
+                            />
+                          </div>
+                        </template>
+                        <img
+                          class="thumb small"
+                          :class="{ active: candidate.member.image_id === store.selectedMemberId }"
+                          :src="getImageUrl(candidate.member.file_path)"
+                          :alt="candidate.member.relative_path"
+                          loading="lazy"
+                          @click.stop="openImageViewer(candidate.member.image_id)"
+                        />
+                      </el-tooltip>
                       <el-tooltip :content="getFileName(candidate.member)" placement="right-start">
                         <el-button
                           class="file-name-button"
@@ -256,14 +313,29 @@
         <el-table-column label="图片" min-width="190">
           <template #default="{ row }">
             <div class="image-cell">
-              <img
-                class="thumb"
-                :class="{ active: row.member.image_id === store.selectedMemberId }"
-                :src="getImageUrl(row.member.file_path)"
-                :alt="row.member.relative_path"
-                      loading="lazy"
-                      @click.stop="openImageViewer(row.member.image_id)"
+              <el-tooltip
+                placement="right-start"
+                :show-after="200"
+                popper-class="detail-image-preview-tooltip"
+              >
+                <template #content>
+                  <div class="detail-image-preview-tooltip-content">
+                    <img
+                      class="detail-image-preview-large"
+                      :src="getImageUrl(row.member.file_path)"
+                      :alt="row.member.relative_path"
                     />
+                  </div>
+                </template>
+                <img
+                  class="thumb"
+                  :class="{ active: row.member.image_id === store.selectedMemberId }"
+                  :src="getImageUrl(row.member.file_path)"
+                  :alt="row.member.relative_path"
+                  loading="lazy"
+                  @click.stop="openImageViewer(row.member.image_id)"
+                />
+              </el-tooltip>
               <el-tooltip :content="getFileName(row.member)" placement="right-start">
                 <el-button
                   class="file-name-button"
@@ -387,6 +459,7 @@ import type { ComparisonGroupMember, GroupSimilarityProgress, GroupSimilaritySco
 
 const store = useComparisonStore()
 const ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
+const HIGH_PRECISION_SIMILARITY_KEY = 'imagekeeper:high-precision-similarity'
 const GROUP_SCORE_CACHE_LIMIT = 30
 
 type OriginalRowSource = 'auto' | 'manual' | 'fallback'
@@ -414,8 +487,10 @@ const viewerZoom = ref(1)
 const thresholdPopoverVisible = ref(false)
 const isRecycling = ref(false)
 const originalRecognitionPercent = ref(readStoredOriginalRecognitionPercent())
+const useHighPrecisionSimilarity = ref(readStoredHighPrecisionSimilarity())
 const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
+const showEmptyOriginalRows = ref(false)
 const groupSimilarityScores = ref<GroupSimilarityScore[]>([])
 const groupSimilarityScoreCache = new Map<string, GroupSimilarityScore[]>()
 const crossCheckProgress = ref<GroupSimilarityProgress | null>(null)
@@ -449,6 +524,14 @@ const groupKey = computed(() =>
 )
 
 const originalRows = computed(() => buildOriginalRows(group.value?.members || []))
+const visibleOriginalRows = computed(() =>
+  showEmptyOriginalRows.value
+    ? originalRows.value
+    : originalRows.value.filter((row) => row.candidates.length > 0)
+)
+const hiddenOriginalRowCount = computed(() =>
+  originalRows.value.filter((row) => row.candidates.length === 0).length
+)
 
 const crossCheckProgressTotal = computed(() => {
   if (!crossCheckProgress.value) return 0
@@ -529,6 +612,7 @@ watch(
     viewerIndex.value = 0
     manualOriginalIds.value = []
     manualThumbnailIds.value = []
+    showEmptyOriginalRows.value = false
     hasManualAssignmentChanges.value = false
     void loadGroupCrossCheckScores()
   },
@@ -767,6 +851,43 @@ function rememberOriginalRecognitionPercent(value: number) {
   window.localStorage.setItem(ORIGINAL_RECOGNITION_PERCENT_KEY, value.toString())
 }
 
+function readStoredHighPrecisionSimilarity() {
+  return window.localStorage.getItem(HIGH_PRECISION_SIMILARITY_KEY) === 'true'
+}
+
+function rememberHighPrecisionSimilarity(value: boolean) {
+  window.localStorage.setItem(HIGH_PRECISION_SIMILARITY_KEY, String(value))
+}
+
+async function handlePrecisionModeChange(value: string | number | boolean) {
+  const nextValue = Boolean(value)
+  if (nextValue === useHighPrecisionSimilarity.value) return
+
+  if (nextValue) {
+    try {
+      await ElMessageBox.confirm(
+        '高精度会保留颜色信息重新比对当前组，相似度判断更细，但会明显拉长等待时间。是否开启？',
+        '开启高精度相似度对比',
+        {
+          confirmButtonText: '开启高精度',
+          cancelButtonText: '继续低精度',
+          type: 'warning'
+        }
+      )
+    } catch (error) {
+      if (error === 'cancel' || error === 'close') return
+      throw error
+    }
+  }
+
+  useHighPrecisionSimilarity.value = nextValue
+  rememberHighPrecisionSimilarity(nextValue)
+  groupSimilarityScoreCache.clear()
+  groupSimilarityScores.value = []
+  ElMessage.info(nextValue ? '已切换为高精度，将重新计算当前组' : '已切换为低精度，将重新计算当前组')
+  await loadGroupCrossCheckScores()
+}
+
 async function loadGroupCrossCheckScores() {
   const requestId = ++crossCheckRequestId
   const requestKey = `group-${requestId}-${Date.now()}`
@@ -779,7 +900,11 @@ async function loadGroupCrossCheckScores() {
     isLoadingCrossCheck.value = false
     return
   }
-  const scoreCacheKey = getGroupScoreCacheKey(store.currentRunId, currentGroup.members)
+  const scoreCacheKey = getGroupScoreCacheKey(
+    store.currentRunId,
+    currentGroup.members,
+    useHighPrecisionSimilarity.value
+  )
   const cachedScores = groupSimilarityScoreCache.get(scoreCacheKey)
   if (cachedScores) {
     groupSimilarityScores.value = cachedScores
@@ -793,7 +918,8 @@ async function loadGroupCrossCheckScores() {
     const scores = await getGroupSimilarityScores(
       store.currentRunId,
       currentGroup.members.map((member) => member.image_id),
-      requestKey
+      requestKey,
+      useHighPrecisionSimilarity.value
     )
     if (requestId === crossCheckRequestId) {
       groupSimilarityScores.value = scores
@@ -811,7 +937,7 @@ async function loadGroupCrossCheckScores() {
   }
 }
 
-function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[]) {
+function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[], useHighPrecision: boolean) {
   const memberKeys = members
     .map((member) => [
       member.image_id,
@@ -823,7 +949,7 @@ function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[]) 
     ].join('|'))
     .sort()
     .join(';')
-  return `${runId}:${memberKeys}`
+  return `${runId}:${useHighPrecision ? 'high' : 'fast'}:${memberKeys}`
 }
 
 function rememberGroupSimilarityScores(cacheKey: string, scores: GroupSimilarityScore[]) {
@@ -1155,6 +1281,18 @@ function resetImageViewerZoom() {
   white-space: nowrap;
 }
 
+.precision-summary {
+  font-weight: 650;
+
+  &.is-high {
+    color: #f56c6c;
+  }
+
+  &.is-fast {
+    color: #67c23a;
+  }
+}
+
 .detail-actions {
   display: flex;
   align-items: center;
@@ -1283,6 +1421,29 @@ function resetImageViewerZoom() {
   line-height: 18px;
 }
 
+.detail-filter-bar {
+  flex: 0 0 auto;
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border: 1px solid #edf1f7;
+  border-radius: 8px;
+  background: #fbfcff;
+  color: #606266;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.no-candidate-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .detail-table {
   flex: 1;
   min-height: 0;
@@ -1335,6 +1496,26 @@ function resetImageViewerZoom() {
     max-height: 56px;
     max-width: 76px;
   }
+}
+
+:global(.detail-image-preview-tooltip) {
+  padding: 8px;
+}
+
+.detail-image-preview-tooltip-content {
+  max-width: 520px;
+  max-height: 420px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.detail-image-preview-large {
+  max-width: 520px;
+  max-height: 400px;
+  object-fit: contain;
+  border-radius: 6px;
+  display: block;
 }
 
 .file-name {
