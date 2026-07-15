@@ -24,7 +24,6 @@ pub struct TestImageInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestLowPrecisionResult {
-    pub phash_distance: u32,
     pub similarity: f64,
     pub duration_ms: u64,
 }
@@ -84,7 +83,7 @@ fn load_test_image_sync(path: String) -> Result<TestImageInfo> {
         width: image.width(),
         height: image.height(),
         modified_at_ms,
-        phash: PHashComputer::compute_phash(&canonical)?,
+        phash: PHashComputer::compute_from_image(&image)?,
         thumbnail_data_url: format!(
             "data:image/png;base64,{}",
             general_purpose::STANDARD.encode(png.into_inner())
@@ -108,33 +107,28 @@ fn normalized_pair(
             SsimComputer::target_dimensions(target_width, target_height, max_edge);
     }
 
-    let normalize = |image: &image::DynamicImage| -> Result<image::DynamicImage> {
+    let normalize = |image: image::DynamicImage| -> Result<image::DynamicImage> {
         if (image.width(), image.height()) == (target_width, target_height) {
-            Ok(image.clone())
+            Ok(image)
         } else {
-            ImageResizer::resize_to_target(image, target_width, target_height)
+            ImageResizer::resize_to_target(&image, target_width, target_height)
         }
     };
 
-    Ok((normalize(&left)?, normalize(&right)?))
+    Ok((normalize(left)?, normalize(right)?))
 }
 
 fn compute_low_precision_sync(
     baseline_path: String,
     candidate_path: String,
-    baseline_phash: String,
-    candidate_phash: String,
 ) -> Result<TestLowPrecisionResult> {
     let started = Instant::now();
-    let (baseline, candidate) = normalized_pair(
-        Path::new(&baseline_path),
-        Path::new(&candidate_path),
-        Some(512),
-    )?;
 
     Ok(TestLowPrecisionResult {
-        phash_distance: PHashComputer::hamming_distance(&baseline_phash, &candidate_phash)?,
-        similarity: SsimComputer::compute(&baseline, &candidate)?,
+        similarity: SsimComputer::compute_from_files(
+            Path::new(&baseline_path),
+            Path::new(&candidate_path),
+        )?,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -162,7 +156,7 @@ fn compute_standard_ssim_sync(
         normalized_pair(Path::new(&baseline_path), Path::new(&candidate_path), None)?;
 
     Ok(TestStandardSsimResult {
-        score: StandardSsim::compute(&baseline, &candidate)?,
+        score: StandardSsim::compute_owned(baseline, candidate)?,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -202,16 +196,9 @@ pub async fn load_test_image(path: String) -> Result<TestImageInfo> {
 pub async fn compute_test_low_precision(
     baseline_path: String,
     candidate_path: String,
-    baseline_phash: String,
-    candidate_phash: String,
 ) -> Result<TestLowPrecisionResult> {
     tauri::async_runtime::spawn_blocking(move || {
-        compute_low_precision_sync(
-            baseline_path,
-            candidate_path,
-            baseline_phash,
-            candidate_phash,
-        )
+        compute_low_precision_sync(baseline_path, candidate_path)
     })
     .await
     .map_err(join_error)?
@@ -268,6 +255,37 @@ mod tests {
     }
 
     #[test]
+    fn low_precision_uses_the_same_directional_resize_as_the_main_program() {
+        let dir = tempdir().unwrap();
+        let baseline = dir.path().join("baseline.png");
+        let candidate = dir.path().join("candidate.png");
+        ImageBuffer::from_fn(32, 24, |x, y| {
+            Rgb([((x * 7 + y * 3) % 256) as u8, (x * 5) as u8, (y * 9) as u8])
+        })
+        .save(&baseline)
+        .unwrap();
+        ImageBuffer::from_fn(64, 48, |x, y| {
+            Rgb([
+                ((x * 11 + y * 13) % 256) as u8,
+                (x * 3) as u8,
+                (y * 5) as u8,
+            ])
+        })
+        .save(&candidate)
+        .unwrap();
+
+        let expected = SsimComputer::compute_from_files(&baseline, &candidate).unwrap();
+        let actual = compute_low_precision_sync(
+            baseline.to_string_lossy().into_owned(),
+            candidate.to_string_lossy().into_owned(),
+        )
+        .unwrap()
+        .similarity;
+
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+    }
+
+    #[test]
     fn loaded_info_contains_real_thumbnail_and_no_database_state() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("large.png");
@@ -283,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_pair_has_zero_phash_distance_and_scores_one() {
+    fn identical_pair_scores_one_for_both_similarity_algorithms() {
         let dir = tempdir().unwrap();
         let left = dir.path().join("left.png");
         let right = dir.path().join("right.png");
@@ -292,13 +310,8 @@ mod tests {
         let left_info = load_test_image_sync(left.to_string_lossy().into_owned()).unwrap();
         let right_info = load_test_image_sync(right.to_string_lossy().into_owned()).unwrap();
 
-        let low = compute_low_precision_sync(
-            left_info.path.clone(),
-            right_info.path.clone(),
-            left_info.phash.clone(),
-            right_info.phash.clone(),
-        )
-        .unwrap();
+        let low =
+            compute_low_precision_sync(left_info.path.clone(), right_info.path.clone()).unwrap();
         let high = compute_standard_ssim_sync(
             left_info.path,
             right_info.path,
@@ -309,7 +322,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(low.phash_distance, 0);
         assert!((low.similarity - 1.0).abs() < 1e-12);
         assert!((high.score - 1.0).abs() < 1e-12);
     }

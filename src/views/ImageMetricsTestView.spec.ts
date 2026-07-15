@@ -1,9 +1,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ImageMetricsTestView from './ImageMetricsTestView.vue'
 
 const apiMocks = vi.hoisted(() => ({
+  load: vi.fn(),
+  computeLow: vi.fn(),
   computeHigh: vi.fn(async () => ({ score: 0.95, durationMs: 10 }))
 }))
 
@@ -13,21 +15,8 @@ const windowMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/imageMetrics', () => ({
-  loadTestImage: vi.fn(async (path: string) => ({
-    path,
-    fileName: `${path}.png`,
-    fileSize: 100,
-    width: 100,
-    height: 100,
-    modifiedAtMs: 1,
-    phash: path,
-    thumbnailDataUrl: `data:image/png;base64,${path}`
-  })),
-  computeTestLowPrecision: vi.fn(async () => ({
-    phashDistance: 1,
-    similarity: 0.9,
-    durationMs: 2
-  })),
+  loadTestImage: apiMocks.load,
+  computeTestLowPrecision: apiMocks.computeLow,
   computeTestStandardSsim: apiMocks.computeHigh
 }))
 
@@ -68,6 +57,21 @@ describe('ImageMetricsTestView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     windowMocks.closeHandler = undefined
+    apiMocks.load.mockImplementation(async (path: string) => ({
+      path,
+      fileName: `${path}.png`,
+      fileSize: 100,
+      width: 100,
+      height: 100,
+      modifiedAtMs: 1,
+      phash: path === 'candidate' ? '0000000000000001' : '0000000000000000',
+      thumbnailDataUrl: `data:image/png;base64,${path}`
+    }))
+    apiMocks.computeLow.mockResolvedValue({
+      similarity: 0.9,
+      durationMs: 2
+    })
+    apiMocks.computeHigh.mockResolvedValue({ score: 0.95, durationMs: 10 })
   })
 
   it('closes an empty window without confirmation', async () => {
@@ -90,6 +94,18 @@ describe('ImageMetricsTestView', () => {
     await flushPromises()
 
     expect(windowMocks.close).not.toHaveBeenCalled()
+  })
+
+  it('keeps the session when the native close call fails', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm')
+    windowMocks.close.mockRejectedValueOnce(new Error('关闭失败'))
+    const wrapper = mountView()
+    await addPaths(wrapper, ['a'])
+
+    await wrapper.get('[data-test="close-window"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="card-0"]').exists()).toBe(true)
   })
 
   it('intercepts the native close request for a non-empty session', async () => {
@@ -117,5 +133,64 @@ describe('ImageMetricsTestView', () => {
     await flushPromises()
 
     expect(apiMocks.computeHigh).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('0.950000 · 10 ms')
+  })
+
+  it('offers a retry action when low precision calculation fails', async () => {
+    apiMocks.computeLow.mockRejectedValueOnce(new Error('临时失败'))
+    const wrapper = mountView()
+    await addPaths(wrapper, ['base', 'candidate'])
+
+    await wrapper.get('[data-test="card-0"]').trigger('click')
+    await flushPromises()
+    apiMocks.computeLow.mockResolvedValueOnce({
+      similarity: 0.88,
+      durationMs: 3
+    })
+    await wrapper.get('[data-test="low-1"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.computeLow).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('0.880000')
+  })
+
+  it('does not print the original resolution in image cards', async () => {
+    const wrapper = mountView()
+    await addPaths(wrapper, ['large'])
+
+    expect(wrapper.text()).not.toContain('100 × 100')
+  })
+
+  it('shows a card placeholder while an image is loading', async () => {
+    let resolveLoad!: (value: Awaited<ReturnType<typeof apiMocks.load>>) => void
+    apiMocks.load.mockReturnValueOnce(new Promise((resolve) => { resolveLoad = resolve }))
+    const wrapper = mountView()
+
+    const importing = (wrapper.vm as unknown as {
+      addImagePathsForTest: (paths: string[]) => Promise<void>
+    }).addImagePathsForTest(['slow'])
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-test="loading-card"]').exists()).toBe(true)
+    resolveLoad({
+      path: 'slow',
+      fileName: 'slow.png',
+      fileSize: 100,
+      width: 100,
+      height: 100,
+      modifiedAtMs: 1,
+      phash: '0000000000000000',
+      thumbnailDataUrl: 'data:image/png;base64,slow'
+    })
+    await importing
+  })
+
+  it('notifies when duplicate images are skipped', async () => {
+    const info = vi.spyOn(ElMessage, 'info')
+    const wrapper = mountView()
+
+    await addPaths(wrapper, ['same', 'same'])
+
+    expect(info).toHaveBeenCalledWith('已跳过 1 张重复图片')
   })
 })

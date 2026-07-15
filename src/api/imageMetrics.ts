@@ -12,7 +12,6 @@ export interface TestImageInfo {
 }
 
 export interface TestLowPrecisionResult {
-  phashDistance: number
   similarity: number
   durationMs: number
 }
@@ -32,9 +31,7 @@ export function computeTestLowPrecision(
 ): Promise<TestLowPrecisionResult> {
   return invoke<TestLowPrecisionResult>('compute_test_low_precision', {
     baselinePath: baseline.path,
-    candidatePath: candidate.path,
-    baselinePhash: baseline.phash,
-    candidatePhash: candidate.phash
+    candidatePath: candidate.path
   })
 }
 

@@ -1,3 +1,4 @@
+use crate::core::phash::PHashComputer;
 use crate::db::models::FolderRole;
 use crate::db::repository::Repository;
 use crate::error::{AppError, Result};
@@ -135,8 +136,7 @@ impl ScanEngine {
         // 计算 BLAKE3 哈希
         let blake3_hash = self.compute_blake3(file_path)?;
 
-        // 计算 pHash (暂时使用占位符)
-        let phash = self.compute_phash(&img)?;
+        let phash = PHashComputer::compute_from_image(&img)?;
 
         // 创建图片记录
         let image_id = {
@@ -204,77 +204,6 @@ impl ScanEngine {
         }
 
         Ok(hasher.finalize().to_hex().to_string())
-    }
-
-    /// 计算 pHash (DCT-based 实现)
-    fn compute_phash(&self, img: &image::DynamicImage) -> Result<String> {
-        // 1. 缩放到 32x32
-        let resized = img.resize_exact(32, 32, image::imageops::FilterType::Lanczos3);
-
-        // 2. 转换为灰度
-        let gray = resized.to_luma8();
-        let pixels = gray.as_raw();
-
-        // 3. 执行 DCT 变换
-        let dct_matrix = self.compute_dct(pixels, 32, 32);
-
-        // 4. 提取左上角 8x8 低频分量（跳过 DC 分量 [0,0]）
-        let mut low_freq = Vec::new();
-        for y in 0..8 {
-            for x in 0..8 {
-                if x == 0 && y == 0 {
-                    continue; // 跳过 DC 分量
-                }
-                low_freq.push(dct_matrix[y * 32 + x]);
-            }
-        }
-
-        // 5. 计算中值
-        let mut sorted = low_freq.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = sorted[sorted.len() / 2];
-
-        // 6. 生成 64 位哈希（8x8 - 1 = 63 位，补齐到 64）
-        let mut hash = 0u64;
-        for (i, &value) in low_freq.iter().enumerate().take(63) {
-            if value > median {
-                hash |= 1u64 << i;
-            }
-        }
-
-        Ok(format!("{:016x}", hash))
-    }
-
-    /// 计算 DCT (简化版 2D DCT)
-    fn compute_dct(&self, pixels: &[u8], width: usize, height: usize) -> Vec<f64> {
-        let mut dct = vec![0.0; width * height];
-
-        for v in 0..height {
-            for u in 0..width {
-                let mut sum = 0.0;
-
-                for y in 0..height {
-                    for x in 0..width {
-                        let pixel_value = pixels[y * width + x] as f64;
-                        let cos_x = ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI
-                            / (2.0 * width as f64))
-                            .cos();
-                        let cos_y = ((2.0 * y as f64 + 1.0) * v as f64 * std::f64::consts::PI
-                            / (2.0 * height as f64))
-                            .cos();
-                        sum += pixel_value * cos_x * cos_y;
-                    }
-                }
-
-                // 归一化系数
-                let cu = if u == 0 { 1.0 / (2.0_f64).sqrt() } else { 1.0 };
-                let cv = if v == 0 { 1.0 / (2.0_f64).sqrt() } else { 1.0 };
-
-                dct[v * width + u] = 0.25 * cu * cv * sum;
-            }
-        }
-
-        dct
     }
 
     /// 检查路径是否应该包含

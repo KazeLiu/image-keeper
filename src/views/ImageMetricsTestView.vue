@@ -30,7 +30,7 @@
       </div>
       <div class="guide-item">
         <strong>尺寸处理</strong>
-        <span>大图缩小到较小图尺寸；低精度最长边 512px，标准 SSIM 使用较小图完整分辨率。</span>
+        <span>低精度复用主程序尺寸策略且最长边 512px；标准 SSIM 按像素较少图片的尺寸对齐。</span>
       </div>
     </section>
 
@@ -62,7 +62,10 @@
         <span>松开即可添加图片</span>
       </div>
 
-      <div v-if="session.items.value.length === 0" class="empty-state">
+      <div
+        v-if="session.items.value.length === 0 && session.loadingCount.value === 0"
+        class="empty-state"
+      >
         <el-icon><Picture /></el-icon>
         <h2>添加图片开始测试</h2>
         <p>选择多张图片，或直接拖入此窗口。</p>
@@ -72,7 +75,10 @@
       </div>
 
       <template v-else>
-        <div v-if="!session.baselinePath.value" class="baseline-hint">
+        <div
+          v-if="session.items.value.length > 0 && !session.baselinePath.value"
+          class="baseline-hint"
+        >
           点击一张图片卡片，将它设为底图
         </div>
 
@@ -121,7 +127,7 @@
                 <h2 class="file-name">{{ item.fileName }}</h2>
               </el-tooltip>
               <p class="file-meta">
-                {{ formatFileSize(item.fileSize) }} · {{ item.width }} × {{ item.height }}
+                {{ formatFileSize(item.fileSize) }}
               </p>
 
               <div v-if="item.path === session.baselinePath.value" class="baseline-label">
@@ -137,16 +143,26 @@
                 </el-tooltip>
                 <div class="metric-row">
                   <span>低精度</span>
-                  <span class="metric-value" :class="{ 'is-error': item.low.status === 'error' }">
+                  <el-button
+                    v-if="item.low.status === 'error'"
+                    text
+                    type="primary"
+                    size="small"
+                    :data-test="`low-${index}`"
+                    @click.stop="requestLowPrecision(item.path)"
+                  >
+                    重试
+                  </el-button>
+                  <span v-else class="metric-value">
                     {{ lowPrecisionValue(item) }}
                   </span>
                 </div>
                 <div class="metric-row high-row">
                   <span>标准 SSIM</span>
                   <template v-if="item.high.status === 'done'">
-                    <el-tooltip :content="`耗时 ${formatDuration(item.high.value.durationMs)}`">
-                      <span class="metric-value">{{ formatScore(item.high.value.score) }}</span>
-                    </el-tooltip>
+                    <span class="metric-value">
+                      {{ formatScore(item.high.value.score) }} · {{ formatDuration(item.high.value.durationMs) }}
+                    </span>
                   </template>
                   <span v-else-if="item.high.status === 'loading'" class="metric-pending">
                     计算中…
@@ -171,6 +187,23 @@
                 </p>
               </div>
             </div>
+          </article>
+          <article
+            v-for="index in session.loadingCount.value"
+            :key="`loading-${index}`"
+            class="metrics-card loading-card"
+            data-test="loading-card"
+            aria-label="图片加载中"
+          >
+            <el-skeleton animated>
+              <template #template>
+                <el-skeleton-item variant="image" class="loading-image" />
+                <div class="loading-body">
+                  <el-skeleton-item variant="h3" style="width: 62%" />
+                  <el-skeleton-item variant="text" style="width: 38%" />
+                </div>
+              </template>
+            </el-skeleton>
           </article>
         </div>
       </template>
@@ -234,6 +267,10 @@ async function importPaths(paths: string[]) {
     ElMessage.error(`${session.importErrors.value.length} 张图片加载失败：${session.importErrors.value[0]}`)
     session.clearImportErrors()
   }
+  if (session.duplicateCount.value > 0) {
+    ElMessage.info(`已跳过 ${session.duplicateCount.value} 张重复图片`)
+    session.clearDuplicateCount()
+  }
 }
 
 function selectBaseline(path: string) {
@@ -245,6 +282,10 @@ async function requestHighPrecision(path: string) {
   if (!started) ElMessage.info('请等待当前高精度计算完成')
 }
 
+async function requestLowPrecision(path: string) {
+  await session.retryLowPrecision(path)
+}
+
 function clearAll() {
   session.reset()
   ElMessage.success('已清空本次测试')
@@ -252,9 +293,12 @@ function clearAll() {
 
 async function confirmDiscard() {
   if (!session.hasContent.value) return true
+  const runningNotice = session.hasRunningTasks.value
+    ? '当前计算无法立即中止，会在后台完成后自动释放资源。\n'
+    : ''
   try {
     await ElMessageBox.confirm(
-      '本次测试内容不会保存，关闭后将全部清空。确定关闭吗？',
+      `${runningNotice}本次测试内容不会保存，关闭后将全部清空。确定关闭吗？`,
       '关闭图片指标测试',
       {
         confirmButtonText: '确定关闭',
@@ -271,7 +315,6 @@ async function confirmDiscard() {
 
 async function requestClose() {
   if (!await confirmDiscard()) return
-  session.reset()
   allowNativeClose = true
   try {
     await appWindow.close()
@@ -287,10 +330,8 @@ function phashTooltip(candidatePhash: string) {
 }
 
 function phashValue(item: TestImageItem) {
-  if (item.low.status === 'done') return `${item.low.value.phashDistance} / 64`
-  if (item.low.status === 'error') return '失败'
-  if (item.low.status === 'loading') return '计算中…'
-  return '等待中'
+  if (!session.baselinePath.value) return '等待中'
+  return item.phashDistance === null ? '失败' : `${item.phashDistance} / 64`
 }
 
 function lowPrecisionValue(item: TestImageItem) {
@@ -566,6 +607,21 @@ defineExpose({ addImagePathsForTest: importPaths })
   padding: 32px;
   color: #909399;
   font-size: 13px;
+}
+
+.loading-card {
+  cursor: default;
+}
+
+.loading-image {
+  width: 100%;
+  height: 220px;
+}
+
+.loading-body {
+  padding: 12px;
+  display: grid;
+  gap: 10px;
 }
 
 .remove-button {

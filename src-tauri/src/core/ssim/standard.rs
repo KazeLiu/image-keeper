@@ -14,15 +14,27 @@ impl StandardSsim {
     ///
     /// 边界像素采用镜像延拓；返回值不裁剪，因此标准公式产生的负值会被保留。
     pub fn compute(left: &DynamicImage, right: &DynamicImage) -> Result<f64> {
+        Self::validate_dimensions(left, right)?;
+        Self::compute_gray(left.to_luma8(), right.to_luma8())
+    }
+
+    /// 消费已解码图片计算 SSIM，允许调用方在转灰度时立即释放彩色原图。
+    pub fn compute_owned(left: DynamicImage, right: DynamicImage) -> Result<f64> {
+        Self::validate_dimensions(&left, &right)?;
+        Self::compute_gray(left.into_luma8(), right.into_luma8())
+    }
+
+    fn validate_dimensions(left: &DynamicImage, right: &DynamicImage) -> Result<()> {
         if left.width() != right.width() || left.height() != right.height() {
             return Err(AppError::SsimComputation("图片尺寸不匹配".to_string()));
         }
         if left.width() == 0 || left.height() == 0 {
             return Err(AppError::SsimComputation("图片像素为空".to_string()));
         }
+        Ok(())
+    }
 
-        let left = left.to_luma8();
-        let right = right.to_luma8();
+    fn compute_gray(left: GrayImage, right: GrayImage) -> Result<f64> {
         let kernel = gaussian_kernel();
         let mut horizontal_rows: HashMap<u32, Vec<[f64; 5]>> = HashMap::new();
         let mut score_sum = 0.0;
@@ -148,6 +160,13 @@ mod tests {
     }
 
     #[test]
+    fn owned_images_score_the_same_without_requiring_caller_clones() {
+        let score = StandardSsim::compute_owned(solid(127), solid(127)).unwrap();
+
+        assert!((score - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn black_and_white_match_analytical_reference() {
         let score = StandardSsim::compute(&solid(0), &solid(255)).unwrap();
         let c1 = (0.01_f64 * 255.0).powi(2);
@@ -167,5 +186,24 @@ mod tests {
         .unwrap();
 
         assert!(score < 0.95);
+    }
+
+    #[test]
+    fn patterned_images_match_independent_reference_vector() {
+        let left = GrayImage::from_fn(17, 13, |x, y| {
+            Luma([((x * 17 + y * 29 + (x * y) % 31) % 256) as u8])
+        });
+        let right = GrayImage::from_fn(17, 13, |x, y| {
+            Luma([((x * 11 + y * 37 + ((x + 3) * (y + 5)) % 43) % 256) as u8])
+        });
+
+        let score = StandardSsim::compute(
+            &DynamicImage::ImageLuma8(left),
+            &DynamicImage::ImageLuma8(right),
+        )
+        .unwrap();
+
+        // 由独立的二维 11×11 高斯卷积参考实现生成。
+        assert!((score - 0.383_446_772_514_431).abs() < 1e-12, "{score}");
     }
 }
