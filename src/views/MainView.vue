@@ -19,6 +19,24 @@
         </button>
       </div>
 
+      <button
+        type="button"
+        class="compact-task-card"
+        data-test="open-image-metrics"
+        @click="openMetricsTest"
+      >
+        <span class="compact-task-icon">
+          <el-icon><DataAnalysis /></el-icon>
+        </span>
+        <span class="compact-task-content">
+          <span class="compact-task-title">图片指标测试</span>
+          <span class="compact-task-copy">
+            临时比较多张图片的 pHash、当前相似度与标准 SSIM，不保存记录
+          </span>
+        </span>
+        <span class="compact-task-action">打开独立窗口</span>
+      </button>
+
       <section v-if="activeScreen === 'history'" class="history-panel">
         <div class="history-header">
           <div>
@@ -131,13 +149,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Delete, Expand, FolderOpened, Fold, Plus, Refresh } from '@element-plus/icons-vue'
+import { ArrowLeft, DataAnalysis, Delete, Expand, FolderOpened, Fold, Plus, Refresh } from '@element-plus/icons-vue'
 import ComparisonDirectorySelector from '@/components/ComparisonDirectorySelector.vue'
 import ComparisonProgress from '@/components/ComparisonProgress.vue'
 import ComparisonResults from '@/components/ComparisonResults.vue'
 import ComparisonGroupDetail from '@/components/ComparisonGroupDetail.vue'
 import { useComparisonStore } from '@/stores/comparisonStore'
 import { RunStatus, type ComparisonRunHistoryItem } from '@/types'
+import { openImageMetricsWindow } from '@/features/imageMetrics/window'
 
 const MIN_LEFT_WIDTH = 320
 const MIN_CENTER_WIDTH = 460
@@ -252,6 +271,14 @@ function startNewTask() {
   comparisonStore.clearCurrentRunView()
   activeScreen.value = 'workspace'
   handleWindowResize()
+}
+
+async function openMetricsTest() {
+  try {
+    await openImageMetricsWindow()
+  } catch (error: any) {
+    ElMessage.error(error?.message || '打开图片指标测试窗口失败')
+  }
 }
 
 async function showHistory() {
@@ -516,6 +543,76 @@ onBeforeUnmount(() => {
   outline-offset: 3px;
 }
 
+.compact-task-card {
+  width: 100%;
+  min-height: 96px;
+  margin-top: 16px;
+  padding: 16px 20px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #303133;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.compact-task-card:hover {
+  border-color: #409eff;
+  background: #f8fbff;
+  box-shadow: 0 6px 18px rgba(64, 158, 255, 0.11);
+}
+
+.compact-task-card:focus-visible {
+  outline: 2px solid #409eff;
+  outline-offset: 3px;
+}
+
+.compact-task-icon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ecf5ff;
+  color: #409eff;
+  font-size: 24px;
+}
+
+.compact-task-content {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.compact-task-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.compact-task-copy {
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.compact-task-action {
+  flex: 0 0 auto;
+  color: #409eff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .task-icon {
   width: 58px;
   height: 58px;
@@ -776,6 +873,15 @@ onBeforeUnmount(() => {
 
   .task-card {
     min-height: 190px;
+  }
+
+  .compact-task-card {
+    min-height: 88px;
+    padding: 14px 16px;
+  }
+
+  .compact-task-action {
+    display: none;
   }
 
   .history-header {
