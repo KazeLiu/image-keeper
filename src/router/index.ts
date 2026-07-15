@@ -13,6 +13,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/SettingsView.vue')
   },
   {
+    path: '/image-metrics-test',
+    name: 'ImageMetricsTest',
+    component: () => import('@/views/ImageMetricsTestView.vue')
+  },
+  {
     path: '/export',
     name: 'Export',
     component: () => import('@/views/ExportView.vue')
