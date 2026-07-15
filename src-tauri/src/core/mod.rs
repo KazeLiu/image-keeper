@@ -2,6 +2,7 @@ pub mod classifier;
 pub mod comparison;
 pub mod delete;
 pub mod difference_finder;
+pub mod file_operations;
 pub mod hash;
 pub mod image_features;
 pub mod matching;
