@@ -37,9 +37,10 @@ export async function getComparisonGroups(
 /** 获取当前组内两两相似度 */
 export async function getGroupSimilarityScores(
   runId: string,
-  imageIds: number[]
+  imageIds: number[],
+  requestId: string
 ): Promise<GroupSimilarityScore[]> {
-  return await invoke<GroupSimilarityScore[]>('get_group_similarity_scores', { runId, imageIds })
+  return await invoke<GroupSimilarityScore[]>('get_group_similarity_scores', { runId, imageIds, requestId })
 }
 
 /** 按图片 ID 批量移动到回收站 */

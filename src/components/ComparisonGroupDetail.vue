@@ -98,6 +98,25 @@
       <div v-if="isLoadingCrossCheck" class="cross-check-loading">
         <el-icon class="cross-check-spinner"><Loading /></el-icon>
         <div class="cross-check-loading-title">正在交叉验证组内图片归属...</div>
+        <div v-if="crossCheckProgressText" class="cross-check-current">
+          {{ crossCheckProgressText }}
+        </div>
+        <el-progress
+          v-if="crossCheckProgress && crossCheckProgress.total_pairs > 0"
+          class="cross-check-progress"
+          :percentage="crossCheckProgressPercent"
+          :stroke-width="8"
+          :show-text="false"
+        />
+        <div v-if="crossCheckProgress" class="cross-check-meta">
+          已完成 {{ crossCheckProgress.processed_pairs }} / {{ crossCheckProgress.total_pairs }}
+          <span v-if="crossCheckProgress.skipped_pairs > 0">
+            · 已跳过 {{ crossCheckProgress.skipped_pairs }} 个无意义组合
+          </span>
+          <span v-if="crossCheckProgress.cache_hits > 0">
+            · 缓存命中 {{ crossCheckProgress.cache_hits }}
+          </span>
+        </div>
       </div>
 
       <el-table
@@ -354,13 +373,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, Setting } from '@element-plus/icons-vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { batchRecycleImages, getGroupSimilarityScores } from '@/api/comparison'
 import { useComparisonStore } from '@/stores/comparisonStore'
-import type { ComparisonGroupMember, GroupSimilarityScore } from '@/types'
+import type { ComparisonGroupMember, GroupSimilarityProgress, GroupSimilarityScore } from '@/types'
 
 const store = useComparisonStore()
 const ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
@@ -393,9 +413,13 @@ const originalRecognitionPercent = ref(readStoredOriginalRecognitionPercent())
 const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
 const groupSimilarityScores = ref<GroupSimilarityScore[]>([])
+const crossCheckProgress = ref<GroupSimilarityProgress | null>(null)
 const isLoadingCrossCheck = ref(false)
 const hasManualAssignmentChanges = ref(false)
 let crossCheckRequestId = 0
+let activeCrossCheckRequestKey = ''
+let unlistenGroupSimilarityProgress: UnlistenFn | null = null
+let groupSimilarityProgressListenerPromise: Promise<void> | null = null
 
 const group = computed(() => store.selectedGroup)
 const originalRecognitionThreshold = computed(() => originalRecognitionPercent.value / 100)
@@ -420,6 +444,23 @@ const groupKey = computed(() =>
 )
 
 const originalRows = computed(() => buildOriginalRows(group.value?.members || []))
+
+const crossCheckProgressPercent = computed(() => {
+  if (!crossCheckProgress.value || crossCheckProgress.value.total_pairs <= 0) return 0
+  return Math.min(
+    100,
+    Math.round((crossCheckProgress.value.processed_pairs / crossCheckProgress.value.total_pairs) * 100)
+  )
+})
+
+const crossCheckProgressText = computed(() => {
+  const progress = crossCheckProgress.value
+  if (!progress) return ''
+  const leftName = progress.current_left_file_name
+  const rightName = progress.current_right_file_name
+  if (!leftName || !rightName) return '正在准备组内比对...'
+  return `正在比对：${leftName} ↔ ${rightName}`
+})
 
 const similarityScoreMap = computed(() => {
   const scoreMap = new Map<string, number>()
@@ -464,6 +505,37 @@ watch(
   },
   { immediate: true }
 )
+
+onBeforeUnmount(() => {
+  if (unlistenGroupSimilarityProgress) {
+    unlistenGroupSimilarityProgress()
+    unlistenGroupSimilarityProgress = null
+  }
+})
+
+async function ensureGroupSimilarityProgressListener() {
+  if (unlistenGroupSimilarityProgress) return
+  if (!groupSimilarityProgressListenerPromise) {
+    groupSimilarityProgressListenerPromise = listen<GroupSimilarityProgress>(
+      'group-similarity-progress',
+      (event) => {
+        const progress = event.payload
+        if (progress.request_id !== activeCrossCheckRequestKey) return
+        crossCheckProgress.value = progress
+      }
+    )
+      .then((unlisten) => {
+        unlistenGroupSimilarityProgress = unlisten
+      })
+      .catch((error) => {
+        console.warn('监听组内交叉验证进度失败:', error)
+      })
+      .finally(() => {
+        groupSimilarityProgressListenerPromise = null
+      })
+  }
+  await groupSimilarityProgressListenerPromise
+}
 
 function handleOriginalRowClick(row: OriginalRow) {
   selectMember(row.member)
@@ -659,16 +731,21 @@ function rememberOriginalRecognitionPercent(value: number) {
 
 async function loadGroupCrossCheckScores() {
   const requestId = ++crossCheckRequestId
+  const requestKey = `group-${requestId}-${Date.now()}`
+  activeCrossCheckRequestKey = requestKey
   const currentGroup = group.value
   groupSimilarityScores.value = []
+  crossCheckProgress.value = null
 
   if (!currentGroup || !store.currentRunId || currentGroup.members.length < 2) return
 
   isLoadingCrossCheck.value = true
   try {
+    await ensureGroupSimilarityProgressListener()
     const scores = await getGroupSimilarityScores(
       store.currentRunId,
-      currentGroup.members.map((member) => member.image_id)
+      currentGroup.members.map((member) => member.image_id),
+      requestKey
     )
     if (requestId === crossCheckRequestId) {
       groupSimilarityScores.value = scores
@@ -1107,6 +1184,27 @@ function resetImageViewerZoom() {
   color: #303133;
   font-size: 15px;
   font-weight: 650;
+}
+
+.cross-check-current {
+  width: min(520px, 100%);
+  color: #606266;
+  font-size: 13px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-check-progress {
+  width: min(520px, 100%);
+}
+
+.cross-check-meta {
+  width: min(520px, 100%);
+  color: #909399;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .detail-table {

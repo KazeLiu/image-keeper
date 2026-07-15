@@ -336,6 +336,21 @@ export interface GroupSimilarityScore {
   error_message?: string | null
 }
 
+/** 当前分组交叉验证进度 */
+export interface GroupSimilarityProgress {
+  request_id: string
+  status: 'started' | 'running' | 'completed'
+  total_pairs: number
+  processed_pairs: number
+  current_left_image_id?: number | null
+  current_right_image_id?: number | null
+  current_left_file_name?: string | null
+  current_right_file_name?: string | null
+  cache_hits: number
+  computed_pairs: number
+  skipped_pairs: number
+}
+
 /** 按图片回收的单项结果 */
 export interface ImageRecycleOutcome {
   image_id: number
