@@ -12,6 +12,7 @@ export type MetricState<T> =
   | { status: 'baseline'; value?: undefined; error?: undefined }
 
 export interface TestImageItem extends TestImageInfo {
+  importOrder: number
   phashDistance: number | null
   low: MetricState<TestLowPrecisionResult>
   high: MetricState<TestStandardSsimResult>
@@ -35,6 +36,27 @@ function idle<T>(): MetricState<T> {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+const IMPORT_CONCURRENCY = 3
+let activeImportCount = 0
+const importWaiters: Array<() => void> = []
+
+async function acquireImportPermit() {
+  if (activeImportCount < IMPORT_CONCURRENCY) {
+    activeImportCount += 1
+    return
+  }
+  await new Promise<void>((resolve) => importWaiters.push(resolve))
+}
+
+function releaseImportPermit() {
+  const next = importWaiters.shift()
+  if (next) {
+    next()
+    return
+  }
+  activeImportCount = Math.max(0, activeImportCount - 1)
 }
 
 function highPrecisionCacheKey(left: TestImageInfo, right: TestImageInfo) {
@@ -66,6 +88,7 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
   const highCache = new Map<string, TestStandardSsimResult>()
   let lifecycleGeneration = 0
   let comparisonGeneration = 0
+  let nextImportOrder = 0
   let lowQueue = Promise.resolve()
 
   const highPrecisionBusy = computed(() => highPrecisionCount.value > 0)
@@ -81,21 +104,31 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
 
   async function addPaths(paths: string[]) {
     const lifecycle = lifecycleGeneration
-    for (const path of paths) {
-      loadingCount.value += 1
+    const importBaseOrder = nextImportOrder
+    nextImportOrder += paths.length
+    loadingCount.value += paths.length
+
+    await Promise.all(paths.map(async (path, index) => {
+      await acquireImportPermit()
       try {
+        if (lifecycle !== lifecycleGeneration) return
         const loaded = await deps.loadImage(path)
         if (lifecycle !== lifecycleGeneration) return
         const duplicate = items.value.some(
           (item) => item.path.toLocaleLowerCase() === loaded.path.toLocaleLowerCase()
         )
         if (!duplicate) {
-          items.value.push({
+          const item: TestImageItem = {
             ...loaded,
+            importOrder: importBaseOrder + index,
             phashDistance: null,
             low: idle<TestLowPrecisionResult>(),
             high: idle<TestStandardSsimResult>()
-          })
+          }
+          items.value.push(item)
+          items.value.sort((left, right) => (
+            left.importOrder - right.importOrder
+          ))
         } else {
           duplicateCount.value += 1
         }
@@ -104,9 +137,10 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
           importErrors.value.push(`${path}：${errorMessage(error)}`)
         }
       } finally {
+        releaseImportPermit()
         loadingCount.value = Math.max(0, loadingCount.value - 1)
       }
-    }
+    }))
   }
 
   async function computeLowPrecision(

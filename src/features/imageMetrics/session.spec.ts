@@ -46,6 +46,43 @@ describe('image metrics session', () => {
     expect(session.importErrors.value[0]).toContain('bad')
   })
 
+  it('loads up to three images at a time and keeps import order', async () => {
+    const pending = new Map<string, (value: ReturnType<typeof image>) => void>()
+    let activeImports = 0
+    let maxActiveImports = 0
+    const deps: ImageMetricsDependencies = {
+      loadImage: vi.fn(async (path) => {
+        activeImports += 1
+        maxActiveImports = Math.max(maxActiveImports, activeImports)
+        return await new Promise((resolve) => {
+          pending.set(path, (value) => {
+            activeImports -= 1
+            resolve(value)
+          })
+        })
+      }),
+      computeLow: vi.fn(),
+      computeHigh: vi.fn()
+    }
+    const session = createImageMetricsSession(deps)
+
+    const importing = session.addPaths(['a', 'b', 'c', 'd'])
+
+    expect(session.loadingCount.value).toBe(4)
+    await vi.waitFor(() => expect(deps.loadImage).toHaveBeenCalledTimes(3))
+    expect(maxActiveImports).toBe(3)
+
+    pending.get('c')?.(image('c'))
+    await vi.waitFor(() => expect(deps.loadImage).toHaveBeenCalledTimes(4))
+    pending.get('d')?.(image('d'))
+    pending.get('b')?.(image('b'))
+    pending.get('a')?.(image('a'))
+
+    await importing
+
+    expect(session.items.value.map((item) => item.path)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
   it('automatically computes low precision for every non-baseline image', async () => {
     const deps: ImageMetricsDependencies = {
       loadImage: vi.fn(async (path) => image(path)),
