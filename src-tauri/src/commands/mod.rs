@@ -1,6 +1,7 @@
 pub mod comparison;
 pub mod difference_finder;
 pub mod directory;
+pub mod image_metrics;
 pub mod recycle;
 pub mod report;
 pub mod scan;
