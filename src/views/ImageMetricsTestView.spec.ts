@@ -11,7 +11,9 @@ const apiMocks = vi.hoisted(() => ({
 
 const windowMocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
-  closeHandler: undefined as undefined | ((event: { preventDefault: () => void }) => Promise<void>)
+  closeHandler: undefined as undefined | ((
+    event: { preventDefault: () => void }
+  ) => void | Promise<void>)
 }))
 
 vi.mock('@/api/imageMetrics', () => ({
@@ -119,6 +121,26 @@ describe('ImageMetricsTestView', () => {
 
     expect(preventDefault).toHaveBeenCalledTimes(1)
     expect(windowMocks.close).not.toHaveBeenCalled()
+  })
+
+  it('does not await discard confirmation inside the native close handler', async () => {
+    let resolveConfirm!: (value: string) => void
+    vi.spyOn(ElMessageBox, 'confirm').mockReturnValue(new Promise((resolve) => {
+      resolveConfirm = resolve
+    }))
+    const wrapper = mountView()
+    await addPaths(wrapper, ['a'])
+    await flushPromises()
+    const preventDefault = vi.fn()
+
+    const result = windowMocks.closeHandler?.({ preventDefault })
+
+    expect(result).toBeUndefined()
+    expect(preventDefault).toHaveBeenCalledTimes(1)
+    expect(windowMocks.close).not.toHaveBeenCalled()
+    resolveConfirm('confirm')
+    await flushPromises()
+    expect(windowMocks.close).toHaveBeenCalledTimes(1)
   })
 
   it('computes standard ssim only after the card action is clicked', async () => {

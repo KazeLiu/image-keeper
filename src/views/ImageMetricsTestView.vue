@@ -361,10 +361,10 @@ function message(error: unknown) {
 }
 
 onMounted(async () => {
-  unlistenClose = await appWindow.onCloseRequested(async (event) => {
+  unlistenClose = await appWindow.onCloseRequested((event) => {
     if (allowNativeClose) return
     event.preventDefault()
-    await requestClose()
+    void requestClose()
   })
   unlistenDrop = await appWindow.onDragDropEvent(async (event) => {
     if (event.payload.type === 'over') {
