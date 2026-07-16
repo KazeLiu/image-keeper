@@ -158,6 +158,20 @@ describe('ImageMetricsTestView', () => {
     expect(wrapper.text()).toContain('0.950000 · 10 ms')
   })
 
+  it('renders candidate metrics in one compact line', async () => {
+    const wrapper = mountView()
+    await addPaths(wrapper, ['base', 'candidate'])
+
+    await wrapper.get('[data-test="card-0"]').trigger('click')
+    await flushPromises()
+
+    const metrics = wrapper.get('[data-test="card-1"] .metrics-inline')
+    expect(metrics.text()).toContain('pHash 距离：1')
+    expect(metrics.text()).not.toContain('/ 64')
+    expect(metrics.text()).toContain('低精度 SSIM：0.900000')
+    expect(metrics.text()).toContain('标准 SSIM：点击计算')
+  })
+
   it('offers a retry action when low precision calculation fails', async () => {
     apiMocks.computeLow.mockRejectedValueOnce(new Error('临时失败'))
     const wrapper = mountView()

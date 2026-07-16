@@ -30,7 +30,7 @@
       </div>
       <div class="guide-item">
         <strong>尺寸处理</strong>
-        <span>低精度复用主程序尺寸策略且最长边 512px；标准 SSIM 按像素较少图片的尺寸对齐。</span>
+        <span>低精度复用主程序尺寸策略且最长边 512px；标准 SSIM 不使用 200px 缩略图或 512px 限制，仅将较大原图缩小到较小原图的完整分辨率。</span>
       </div>
     </section>
 
@@ -135,55 +135,57 @@
               </div>
 
               <div v-else class="metrics-list">
-                <el-tooltip :content="phashTooltip(item.phash)" placement="top-start">
-                  <div class="metric-row">
-                    <span>pHash 距离</span>
-                    <span class="metric-value">{{ phashValue(item) }}</span>
-                  </div>
-                </el-tooltip>
-                <div class="metric-row">
-                  <span>低精度</span>
-                  <el-button
-                    v-if="item.low.status === 'error'"
-                    text
-                    type="primary"
-                    size="small"
-                    :data-test="`low-${index}`"
-                    @click.stop="requestLowPrecision(item.path)"
-                  >
-                    重试
-                  </el-button>
-                  <span v-else class="metric-value">
-                    {{ lowPrecisionValue(item) }}
-                  </span>
-                </div>
-                <div class="metric-row high-row">
-                  <span>标准 SSIM</span>
-                  <template v-if="item.high.status === 'done'">
-                    <span class="metric-value">
-                      {{ formatScore(item.high.value.score) }} · {{ formatDuration(item.high.value.durationMs) }}
+                <div class="metrics-inline">
+                  <el-tooltip :content="phashTooltip(item.phash)" placement="top-start">
+                    <span class="metric-chip">
+                      <span>pHash 距离：</span>
+                      <span class="metric-value">{{ phashValue(item) }}</span>
                     </span>
-                  </template>
-                  <span v-else-if="item.high.status === 'loading'" class="metric-pending">
-                    计算中…
+                  </el-tooltip>
+                  <span class="metric-chip">
+                    <span>低精度 SSIM：</span>
+                    <el-button
+                      v-if="item.low.status === 'error'"
+                      text
+                      type="primary"
+                      size="small"
+                      :data-test="`low-${index}`"
+                      @click.stop="requestLowPrecision(item.path)"
+                    >
+                      重试
+                    </el-button>
+                    <span v-else class="metric-value">
+                      {{ lowPrecisionValue(item) }}
+                    </span>
                   </span>
-                  <el-button
-                    v-else
-                    text
-                    type="primary"
-                    size="small"
-                    :data-test="`high-${index}`"
-                    :disabled="!session.baselinePath.value"
-                    @click.stop="requestHighPrecision(item.path)"
-                  >
-                    {{ item.high.status === 'error' ? '重试' : '点击计算' }}
-                  </el-button>
+                  <span class="metric-chip">
+                    <span>标准 SSIM：</span>
+                    <template v-if="item.high.status === 'done'">
+                      <span class="metric-value">
+                        {{ formatScore(item.high.value.score) }} · {{ formatDuration(item.high.value.durationMs) }}
+                      </span>
+                    </template>
+                    <span v-else-if="item.high.status === 'loading'" class="metric-pending">
+                      计算中…
+                    </span>
+                    <el-button
+                      v-else
+                      text
+                      type="primary"
+                      size="small"
+                      :data-test="`high-${index}`"
+                      :disabled="!session.baselinePath.value"
+                      @click.stop="requestHighPrecision(item.path)"
+                    >
+                      {{ item.high.status === 'error' ? '重试' : '点击计算' }}
+                    </el-button>
+                  </span>
                 </div>
                 <p v-if="item.low.status === 'error'" class="metric-error">
                   低精度失败：{{ item.low.error }}
                 </p>
                 <p v-if="item.high.status === 'error'" class="metric-error">
-                  高精度失败：{{ item.high.error }}
+                  标准 SSIM 失败：{{ item.high.error }}
                 </p>
               </div>
             </div>
@@ -331,7 +333,7 @@ function phashTooltip(candidatePhash: string) {
 
 function phashValue(item: TestImageItem) {
   if (!session.baselinePath.value) return '等待中'
-  return item.phashDistance === null ? '失败' : `${item.phashDistance} / 64`
+  return item.phashDistance === null ? '失败' : String(item.phashDistance)
 }
 
 function lowPrecisionValue(item: TestImageItem) {
@@ -552,8 +554,8 @@ defineExpose({ addImagePathsForTest: importPaths })
 .metrics-grid {
   padding: 12px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr));
+  gap: 12px;
   align-content: start;
 }
 
@@ -587,19 +589,19 @@ defineExpose({ addImagePathsForTest: importPaths })
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 180px;
-  max-height: 500px;
+  min-height: 120px;
+  max-height: 200px;
   background: #f5f7fa;
   overflow: hidden;
 }
 
 .metrics-image {
   width: 100%;
-  max-height: 500px;
+  max-height: 200px;
   display: block;
 
   :deep(.el-image__inner) {
-    max-height: 500px;
+    max-height: 200px;
   }
 }
 
@@ -615,7 +617,7 @@ defineExpose({ addImagePathsForTest: importPaths })
 
 .loading-image {
   width: 100%;
-  height: 220px;
+  height: 160px;
 }
 
 .loading-body {
@@ -668,19 +670,26 @@ defineExpose({ addImagePathsForTest: importPaths })
   border-top: 1px solid #ebeef5;
 }
 
-.metric-row {
-  min-height: 34px;
+.metrics-inline {
+  padding-top: 8px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid #ebeef5;
+  gap: 6px 10px;
+  flex-wrap: wrap;
   color: #606266;
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.high-row :deep(.el-button) {
-  padding-right: 0;
+.metric-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+
+  :deep(.el-button) {
+    height: auto;
+    padding: 0;
+  }
 }
 
 .metric-value,

@@ -36,7 +36,7 @@ pub struct TestStandardSsimResult {
 }
 
 fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
-    SsimComputer::target_dimensions(width, height, 500)
+    SsimComputer::target_dimensions(width, height, 200)
 }
 
 fn pair_target_dimensions(left: (u32, u32), right: (u32, u32)) -> (u32, u32) {
@@ -240,9 +240,9 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_longest_edge_is_at_most_500() {
-        assert_eq!(thumbnail_dimensions(2000, 1000), (500, 250));
-        assert_eq!(thumbnail_dimensions(320, 240), (320, 240));
+    fn thumbnail_longest_edge_is_at_most_200() {
+        assert_eq!(thumbnail_dimensions(2000, 1000), (200, 100));
+        assert_eq!(thumbnail_dimensions(160, 120), (160, 120));
     }
 
     #[test]
