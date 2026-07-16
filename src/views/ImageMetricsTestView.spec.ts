@@ -5,6 +5,7 @@ import ImageMetricsTestView from './ImageMetricsTestView.vue'
 
 const apiMocks = vi.hoisted(() => ({
   load: vi.fn(),
+  computePhash: vi.fn(),
   computeLow: vi.fn(),
   computeHigh: vi.fn(async () => ({ score: 0.95, durationMs: 10 }))
 }))
@@ -18,6 +19,7 @@ const windowMocks = vi.hoisted(() => ({
 
 vi.mock('@/api/imageMetrics', () => ({
   loadTestImage: apiMocks.load,
+  computeTestPhash: apiMocks.computePhash,
   computeTestLowPrecision: apiMocks.computeLow,
   computeTestStandardSsim: apiMocks.computeHigh
 }))
@@ -66,8 +68,10 @@ describe('ImageMetricsTestView', () => {
       width: 100,
       height: 100,
       modifiedAtMs: 1,
-      phash: path === 'candidate' ? '0000000000000001' : '0000000000000000',
       thumbnailDataUrl: `data:image/png;base64,${path}`
+    }))
+    apiMocks.computePhash.mockImplementation(async ({ path }: { path: string }) => ({
+      phash: path === 'candidate' ? '0000000000000001' : '0000000000000000'
     }))
     apiMocks.computeLow.mockResolvedValue({
       similarity: 0.9,
@@ -77,24 +81,26 @@ describe('ImageMetricsTestView', () => {
   })
 
   it('closes an empty window without confirmation', async () => {
-    const confirm = vi.spyOn(ElMessageBox, 'confirm')
     const wrapper = mountView()
+    await flushPromises()
+    const preventDefault = vi.fn()
 
-    await wrapper.get('[data-test="close-window"]').trigger('click')
+    await windowMocks.closeHandler?.({ preventDefault })
     await flushPromises()
 
-    expect(confirm).not.toHaveBeenCalled()
-    expect(windowMocks.close).toHaveBeenCalledTimes(1)
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(windowMocks.close).not.toHaveBeenCalled()
   })
 
   it('keeps a non-empty window when discard confirmation is canceled', async () => {
     vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
     const wrapper = mountView()
     await addPaths(wrapper, ['a'])
-
-    await wrapper.get('[data-test="close-window"]').trigger('click')
+    const preventDefault = vi.fn()
+    await windowMocks.closeHandler?.({ preventDefault })
     await flushPromises()
 
+    expect(preventDefault).toHaveBeenCalledTimes(1)
     expect(windowMocks.close).not.toHaveBeenCalled()
   })
 
@@ -103,8 +109,8 @@ describe('ImageMetricsTestView', () => {
     windowMocks.close.mockRejectedValueOnce(new Error('关闭失败'))
     const wrapper = mountView()
     await addPaths(wrapper, ['a'])
-
-    await wrapper.get('[data-test="close-window"]').trigger('click')
+    const preventDefault = vi.fn()
+    await windowMocks.closeHandler?.({ preventDefault })
     await flushPromises()
 
     expect(wrapper.find('[data-test="card-0"]').exists()).toBe(true)
@@ -163,13 +169,27 @@ describe('ImageMetricsTestView', () => {
     await addPaths(wrapper, ['base', 'candidate'])
 
     await wrapper.get('[data-test="card-0"]').trigger('click')
-    await flushPromises()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('感知哈希距离：1'))
 
     const metrics = wrapper.get('[data-test="card-1"] .metrics-inline')
-    expect(metrics.text()).toContain('pHash 距离：1')
+    expect(metrics.text()).toContain('感知哈希距离：1')
     expect(metrics.text()).not.toContain('/ 64')
-    expect(metrics.text()).toContain('低精度 SSIM：0.900000')
-    expect(metrics.text()).toContain('标准 SSIM：点击计算')
+    expect(metrics.text()).toContain('低精度结构相似性：0.900000')
+    expect(metrics.text()).toContain('标准结构相似性：点击计算')
+  })
+
+  it('keeps the baseline instruction in the header instead of a disappearing banner', async () => {
+    const wrapper = mountView()
+    await addPaths(wrapper, ['base', 'candidate'])
+
+    expect(wrapper.find('.window-header').text()).toContain('点击一张图片卡片，将它设为标准图')
+    expect(wrapper.find('.baseline-hint').exists()).toBe(false)
+
+    await wrapper.get('[data-test="card-0"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.window-header').text()).toContain('点击一张图片卡片，将它设为标准图')
+    expect(wrapper.find('.baseline-hint').exists()).toBe(false)
   })
 
   it('offers a retry action when low precision calculation fails', async () => {
@@ -178,7 +198,7 @@ describe('ImageMetricsTestView', () => {
     await addPaths(wrapper, ['base', 'candidate'])
 
     await wrapper.get('[data-test="card-0"]').trigger('click')
-    await flushPromises()
+    await vi.waitFor(() => expect(wrapper.find('[data-test="low-1"]').exists()).toBe(true))
     apiMocks.computeLow.mockResolvedValueOnce({
       similarity: 0.88,
       durationMs: 3
@@ -207,7 +227,8 @@ describe('ImageMetricsTestView', () => {
     }).addImagePathsForTest(['slow'])
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('[data-test="loading-card"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="card-0"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="card-0"]').text()).toContain('正在读取图片')
     resolveLoad({
       path: 'slow',
       fileName: 'slow.png',
@@ -215,7 +236,6 @@ describe('ImageMetricsTestView', () => {
       width: 100,
       height: 100,
       modifiedAtMs: 1,
-      phash: '0000000000000000',
       thumbnailDataUrl: 'data:image/png;base64,slow'
     })
     await importing

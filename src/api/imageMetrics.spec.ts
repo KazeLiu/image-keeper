@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { computeTestLowPrecision, type TestImageInfo } from './imageMetrics'
+import { computeTestLowPrecision, computeTestPhash, type TestImageInfo } from './imageMetrics'
 
 const invoke = vi.hoisted(() => vi.fn())
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 
-function image(path: string, phash: string): TestImageInfo {
+function image(path: string): TestImageInfo {
   return {
     path,
     fileName: `${path}.png`,
@@ -13,7 +13,6 @@ function image(path: string, phash: string): TestImageInfo {
     width: 100,
     height: 100,
     modifiedAtMs: 1,
-    phash,
     thumbnailDataUrl: 'data:image/png;base64,test'
   }
 }
@@ -21,17 +20,29 @@ function image(path: string, phash: string): TestImageInfo {
 describe('image metrics api', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('keeps pHash data out of the low precision image task', async () => {
+  it('低精度图片任务不携带感知哈希数据', async () => {
     invoke.mockResolvedValue({ similarity: 0.9, durationMs: 2 })
 
     await computeTestLowPrecision(
-      image('base', '0000000000000000'),
-      image('candidate', '0000000000000001')
+      image('base'),
+      image('candidate')
     )
 
     expect(invoke).toHaveBeenCalledWith('compute_test_low_precision', {
       baselinePath: 'base',
       candidatePath: 'candidate'
+    })
+  })
+
+  it('单独请求感知哈希时携带文件指纹', async () => {
+    invoke.mockResolvedValue({ phash: '0000000000000000' })
+
+    await computeTestPhash(image('base'))
+
+    expect(invoke).toHaveBeenCalledWith('compute_test_phash', {
+      path: 'base',
+      fileSize: 100,
+      modifiedAtMs: 1
     })
   })
 })

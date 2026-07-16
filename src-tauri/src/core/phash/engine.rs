@@ -4,11 +4,11 @@ use crate::db::repository::Repository;
 use crate::error::Result;
 use std::path::Path;
 
-/// pHash 引擎
+/// 感知哈希引擎
 pub struct PHashEngine;
 
 impl PHashEngine {
-    /// 为扫描任务中的所有图片计算 pHash
+    /// 为扫描任务中的所有图片计算感知哈希
     pub fn compute_phashes<F>(
         scan_id: i64,
         repository: &Repository,
@@ -17,15 +17,15 @@ impl PHashEngine {
     where
         F: Fn(ScanProgressEvent) + Send + Sync,
     {
-        // 获取所有未计算 pHash 的图片
+        // 获取所有未计算感知哈希的图片
         let images = Self::get_images_without_phash(scan_id, repository)?;
         let total_files = images.len() as u64;
 
         let mut phashed_count = 0u64;
 
-        // 顺序计算 pHash
+        // 顺序计算感知哈希
         for (id, file_path) in &images {
-            // 计算 pHash
+            // 计算感知哈希
             let phash = PHashComputer::compute_phash(Path::new(file_path))?;
 
             // 更新数据库
@@ -48,7 +48,7 @@ impl PHashEngine {
             });
         }
 
-        // 更新扫描任务的 pHash 计算完成数
+        // 更新扫描任务的感知哈希计算完成数
         repository.conn().execute(
             "UPDATE scans SET phash_computed = ?1 WHERE id = ?2",
             rusqlite::params![total_files, scan_id],
@@ -57,7 +57,7 @@ impl PHashEngine {
         Ok(())
     }
 
-    /// 获取未计算 pHash 的图片列表
+    /// 获取未计算感知哈希的图片列表
     fn get_images_without_phash(
         scan_id: i64,
         repository: &Repository,
@@ -75,14 +75,14 @@ impl PHashEngine {
         Ok(images)
     }
 
-    /// 使用 pHash 快速筛选候选相似对
+    /// 使用感知哈希快速筛选候选相似对
     /// 汉明距离阈值推荐 10
     pub fn filter_candidates_by_phash(
         scan_id: i64,
         repository: &Repository,
         hamming_threshold: u32,
     ) -> Result<Vec<(i64, i64, u32)>> {
-        // 获取所有已计算 pHash 的图片
+        // 获取所有已计算感知哈希的图片
         let mut stmt = repository
             .conn()
             .prepare("SELECT id, phash FROM images WHERE scan_id = ?1 AND phash IS NOT NULL")?;

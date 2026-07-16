@@ -40,6 +40,7 @@ fn main() {
             commands::difference_finder::copy_difference_files,
             commands::difference_finder::undo_difference_batch,
             commands::image_metrics::load_test_image,
+            commands::image_metrics::compute_test_phash,
             commands::image_metrics::compute_test_low_precision,
             commands::image_metrics::compute_test_standard_ssim,
             commands::comparison::start_multi_compare,

@@ -82,7 +82,7 @@ B/C/...：comparisonRoots，待整理的一个或多个对比目录
 - 文件大小和修改时间
 - 宽、高、格式、帧处理策略
 - BLAKE3 指纹
-- pHash 及其算法版本
+- 感知哈希及其算法版本
 - 扫描、解码和特征提取状态
 
 绝对路径用于本地执行，但报告默认使用根目录别名和相对路径，降低隐私泄露风险。
@@ -160,7 +160,7 @@ none
 → 识别格式与解码策略
 → 读取宽高/帧信息
 → 计算 BLAKE3
-→ 计算 64 位 pHash
+→ 计算 64 位感知哈希
 → 保存单文件阶段状态
 ```
 
@@ -194,12 +194,12 @@ for root in comparisonRoots:
 
 ### Phase 3：候选筛选
 
-pHash 只负责从 A 中召回候选，不负责最终分类或删除。
+感知哈希只负责从 A 中召回候选，不负责最终分类或删除。
 
 ```text
 for root in comparisonRoots:
     for image in root 中未精确匹配的文件:
-        candidates = baselinePHashIndex.search(image.pHash, maxDistance)
+        candidates = baselinePerceptualHashIndex.search(image.perceptualHash, maxDistance)
         应用宽高比和基础可比性检查
         保留按距离排序的 Top-K 候选
 ```
@@ -207,7 +207,7 @@ for root in comparisonRoots:
 实现约束：
 
 - 不得在大图库中直接执行 `A × (B+C+...)` 全遍历。
-- pHash 索引可使用 BK-tree、分桶、多索引哈希或等价的近邻查询结构。
+- 感知哈希索引可使用 BK-tree、分桶、多索引哈希或等价的近邻查询结构。
 - 初始建议 `maxDistance = 10`，边界语义为 `distance <= 10`；该值属于算法配置，不是永久常量。
 - 宽高比差异使用相对误差公式，不使用模糊的“分辨率差异百分比”：
 
@@ -221,7 +221,7 @@ aspectDiff = abs(aspectA - aspectX) / max(aspectA, aspectX)
 
 ### Phase 4：规范化与相似度计算
 
-只有候选对进入本阶段。相似度算法必须实现真正、版本固定的 SSIM 或经验证的等价指标，不能把简单 MSE 映射命名为 SSIM。
+只有候选对进入本阶段。相似度算法必须实现真正、版本固定的结构相似性或经验证的等价指标，不能把简单 MSE 映射命名为结构相似性。
 
 #### 4.1 像素规范化协议
 
@@ -233,7 +233,7 @@ aspectDiff = abs(aspectA - aspectX) / max(aspectA, aspectX)
 4. 动画帧选择规则。
 5. 宽高比容差。
 6. 缩放方向、目标尺寸、重采样算法和边界处理。
-7. SSIM 的窗口大小、通道策略和常量参数。
+7. 结构相似性的窗口大小、通道策略和常量参数。
 
 对于尺寸不同且宽高比可比的图片，统一把较高分辨率图片缩放到较低分辨率图片的尺寸后计算；不得把较低分辨率图片放大后再据此证明其质量更高。
 
@@ -245,8 +245,8 @@ aspectDiff = abs(aspectA - aspectX) / max(aspectA, aspectX)
 
 | 参数 | 初始值 | 用途 |
 |---|---:|---|
-| pHash 最大汉明距离 | `10` | 候选召回 |
-| 压缩候选 SSIM | `>= 0.995` | 生成 `likely_compressed` 候选 |
+| 感知哈希最大汉明距离 | `10` | 候选召回 |
+| 压缩候选结构相似性 | `>= 0.995` | 生成 `likely_compressed` 候选 |
 | 变体审核下限 | `>= 0.75` | 进入变体/相似结果仲裁 |
 | 宽高比相对误差 | `<= 0.5%` | 判断是否可进行缩放比较 |
 | 主匹配并列差值 | `<= 0.001` | 触发多候选人工确认 |
@@ -276,12 +276,12 @@ X.height < A.height
 X.pixelCount < A.pixelCount
 X.fileSize < A.fileSize
 aspectDiff <= aspectTolerance
-SSIM >= compressedThreshold
+结构相似性 >= compressedThreshold
 ```
 
 补充边界：
 
-- 任一宽或高不小于 A 时，不得仅凭 SSIM 判定 X 是 A 的压缩版。
+- 任一宽或高不小于 A 时，不得仅凭结构相似性判定 X 是 A 的压缩版。
 - 分辨率相同的重新编码文件不得自动归为低质量版本，只能进入 `variant`、`similar_keep` 或 `inconclusive`。
 - 文件大小只作为有方向性的辅助条件，不代表视觉质量。
 - A 比 X 更小、方向矛盾、格式能力差异明显或存在 Alpha/动画语义差异时，默认保留并人工确认。
@@ -290,14 +290,14 @@ SSIM >= compressedThreshold
 
 - 同尺寸或近似尺寸、主题高度相似但局部内容不同的图片优先分类为 `variant`。
 - 相似度达到候选范围但不满足压缩方向条件时分类为 `similar_keep`。
-- SSIM 区间不能单独证明“差分图”；最终分类还需结合尺寸、配对证据和必要的人工查看。
+- 结构相似性区间不能单独证明“差分图”；最终分类还需结合尺寸、配对证据和必要的人工查看。
 
 #### 5.3 多候选仲裁
 
 每张对比图片先收集全部候选结果，再确定主匹配和最终分类：
 
 1. 精确哈希匹配优先于任何相似度匹配。
-2. 非精确候选按可比性、SSIM、pHash 距离和 A 图像分辨率稳定排序。
+2. 非精确候选按可比性、结构相似性、感知哈希距离和 A 图像分辨率稳定排序。
 3. 保留全部候选证据，展示主匹配不等于丢弃其他候选。
 4. 排名前两项分数接近、分类结论冲突或候选被截断时，结果为 `inconclusive`。
 5. 不得根据数据库返回顺序或文件遍历顺序决定主匹配。
@@ -307,7 +307,7 @@ SSIM >= compressedThreshold
 复核界面在本地提供：
 
 - A 与对比图片并排查看。
-- 分辨率、格式、大小、BLAKE3、pHash 距离和 SSIM。
+- 分辨率、格式、大小、BLAKE3、感知哈希距离和结构相似性。
 - 缩放方向、归一化配置和所有候选 A。
 - 可选的局部放大、叠加和差异视图。
 - 算法建议、风险提示和人工决定原因。
@@ -401,7 +401,7 @@ JSON 是完整、可机器读取的主报告。示例：
   "algorithmProfile": {
     "id": "imagekeeper-v1-ssim",
     "hash": "blake3",
-    "pHashMaxDistance": 10,
+    "perceptualHashMaxDistance": 10,
     "compressedSsimThreshold": 0.995,
     "normalizationVersion": 1
   },
@@ -430,7 +430,7 @@ JSON 是完整、可机器读取的主报告。示例：
       "primaryMatch": "A:originals/example.png",
       "sourceBlake3": "...",
       "matchBlake3": "...",
-      "pHashDistance": 2,
+      "perceptualHashDistance": 2,
       "ssim": 0.996,
       "sourceResolution": [1920, 1080],
       "matchResolution": [3840, 2160],
@@ -486,12 +486,12 @@ completed_with_errors | paused | canceled | failed
 ## 7. 性能与扩展边界
 
 - BLAKE3 使用哈希索引，精确匹配目标复杂度接近 O(N)。
-- pHash 使用近邻索引，禁止在目标图库规模下默认全量笛卡尔积。
-- SSIM 只处理候选对，并记录候选数量、截断数量和实际耗时。
+- 感知哈希使用近邻索引，禁止在目标图库规模下默认全量笛卡尔积。
+- 结构相似性只处理候选对，并记录候选数量、截断数量和实际耗时。
 - 特征缓存按文件指纹和算法版本失效。
 - 并行计算不得共享不安全的数据库连接；计算结果通过有界队列批量持久化。
 - 并发只影响性能，不能改变候选排序、分类结果或主匹配选择。
-- 进度使用稳定阶段 ID，不把 pHash 阶段显示为错误的 Phase 编号。
+- 进度使用稳定阶段 ID，不把感知哈希阶段显示为错误的 Phase 编号。
 
 性能基准必须分别报告冷缓存、热缓存、文件格式、平均分辨率、存储介质和线程数，不能用单一“每张 50ms”作为产品承诺。
 
@@ -517,7 +517,7 @@ completed_with_errors | paused | canceled | failed
 - 局部差分、文字覆盖、水印和轻微调色。
 - 不同宽高比、裁剪、旋转和 EXIF orientation。
 - Alpha、灰度、广色域、动画第一帧和损坏文件。
-- SSIM/pHash 阈值边界及其等号情况。
+- 结构相似性/感知哈希阈值边界及其等号情况。
 - 一张对比图片匹配多个 A 的冲突场景。
 
 阈值回归测试必须记录算法配置和 fixture BLAKE3。任何算法、解码或缩放依赖升级都要重新运行。
@@ -557,7 +557,7 @@ completed_with_errors | paused | canceled | failed
 ### 匹配与分类
 
 - [ ] B/C/... 使用同一套 `comparisonRoot → A` 流程。
-- [ ] 固定使用 BLAKE3，pHash 只用于候选召回。
+- [ ] 固定使用 BLAKE3，感知哈希只用于候选召回。
 - [ ] 实现的相似度指标与文档名称及阈值一致。
 - [ ] 归一化协议固定且可版本化复现。
 - [ ] 压缩候选判定保留大小方向，不使用 `min/max` 丢失方向。
@@ -589,6 +589,6 @@ completed_with_errors | paused | canceled | failed
 
 ## 12. 参考资料
 
-- [SSIM 算法原理](https://en.wikipedia.org/wiki/Structural_similarity)
+- [结构相似性算法原理](https://en.wikipedia.org/wiki/Structural_similarity)
 - [感知哈希介绍](http://www.hackerfactor.com/blog/index.php?/archives/432-Looks-Like-It.html)
 - [汉明距离](https://en.wikipedia.org/wiki/Hamming_distance)

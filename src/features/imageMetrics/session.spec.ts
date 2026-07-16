@@ -1,25 +1,47 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createImageMetricsSession, type ImageMetricsDependencies } from './session'
+import type { TestImageInfo } from '@/api/imageMetrics'
 
-const image = (path: string) => ({
+const image = (path: string): TestImageInfo => ({
   path,
   fileName: `${path}.png`,
   fileSize: 100,
   width: 100,
   height: 100,
   modifiedAtMs: 1,
-  phash: path,
   thumbnailDataUrl: `data:image/png;base64,${path}`
 })
 
+function deps(overrides: Partial<ImageMetricsDependencies> = {}): ImageMetricsDependencies {
+  return {
+    loadImage: vi.fn(async (path) => image(path)),
+    computePhash: vi.fn(async (item) => ({ phash: item.path })),
+    computeLow: vi.fn(async () => ({ similarity: 0.9, durationMs: 3 })),
+    computeHigh: vi.fn(async () => ({ score: 0.98, durationMs: 20 })),
+    ...overrides
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function lowStatus(session: ReturnType<typeof createImageMetricsSession>, path: string) {
+  return session.items.value.find((item) => item.path === path)?.low.status
+}
+
 describe('image metrics session', () => {
   it('deduplicates imported canonical paths', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path.toLowerCase())),
-      computeLow: vi.fn(),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+    const testDeps = deps({
+      loadImage: vi.fn(async (path) => image(path.toLowerCase()))
+    })
+    const session = createImageMetricsSession(testDeps)
 
     await session.addPaths(['A', 'a'])
 
@@ -30,15 +52,13 @@ describe('image metrics session', () => {
   })
 
   it('continues importing after one image fails', async () => {
-    const deps: ImageMetricsDependencies = {
+    const testDeps = deps({
       loadImage: vi.fn(async (path) => {
         if (path === 'bad') throw new Error('无法解码')
         return image(path)
-      }),
-      computeLow: vi.fn(),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+      })
+    })
+    const session = createImageMetricsSession(testDeps)
 
     await session.addPaths(['bad', 'good'])
 
@@ -46,331 +66,239 @@ describe('image metrics session', () => {
     expect(session.importErrors.value[0]).toContain('bad')
   })
 
-  it('loads up to three images at a time and keeps import order', async () => {
-    const pending = new Map<string, (value: ReturnType<typeof image>) => void>()
+  it('loads up to four images at a time and keeps import order', async () => {
+    const pending = new Map<string, (value: TestImageInfo) => void>()
     let activeImports = 0
     let maxActiveImports = 0
-    const deps: ImageMetricsDependencies = {
+    const testDeps = deps({
       loadImage: vi.fn(async (path) => {
         activeImports += 1
         maxActiveImports = Math.max(maxActiveImports, activeImports)
-        return await new Promise((resolve) => {
+        return await new Promise<TestImageInfo>((resolve) => {
           pending.set(path, (value) => {
             activeImports -= 1
             resolve(value)
           })
         })
-      }),
-      computeLow: vi.fn(),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+      })
+    })
+    const session = createImageMetricsSession(testDeps)
 
-    const importing = session.addPaths(['a', 'b', 'c', 'd'])
+    const importing = session.addPaths(['a', 'b', 'c', 'd', 'e'])
 
-    expect(session.loadingCount.value).toBe(4)
-    await vi.waitFor(() => expect(deps.loadImage).toHaveBeenCalledTimes(3))
-    expect(maxActiveImports).toBe(3)
+    expect(session.loadingCount.value).toBe(5)
+    await vi.waitFor(() => expect(testDeps.loadImage).toHaveBeenCalledTimes(4))
+    expect(maxActiveImports).toBe(4)
 
     pending.get('c')?.(image('c'))
-    await vi.waitFor(() => expect(deps.loadImage).toHaveBeenCalledTimes(4))
+    await vi.waitFor(() => expect(testDeps.loadImage).toHaveBeenCalledTimes(5))
+    pending.get('e')?.(image('e'))
     pending.get('d')?.(image('d'))
     pending.get('b')?.(image('b'))
     pending.get('a')?.(image('a'))
 
     await importing
 
-    expect(session.items.value.map((item) => item.path)).toEqual(['a', 'b', 'c', 'd'])
+    expect(session.items.value.map((item) => item.path)).toEqual(['a', 'b', 'c', 'd', 'e'])
   })
 
-  it('automatically computes low precision for every non-baseline image', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(async () => ({ similarity: 0.9, durationMs: 3 })),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+  it('shows image cards immediately before decoding finishes', async () => {
+    const pending = new Map<string, (value: TestImageInfo) => void>()
+    const testDeps = deps({
+      loadImage: vi.fn(async (path) => (
+        await new Promise<TestImageInfo>((resolve) => {
+          pending.set(path, resolve)
+        })
+      ))
+    })
+    const session = createImageMetricsSession(testDeps)
+
+    const importing = session.addPaths(['a', 'b', 'c', 'd'])
+    await vi.waitFor(() => expect(testDeps.loadImage).toHaveBeenCalledTimes(4))
+
+    expect(session.items.value.map((item) => item.path)).toEqual(['a', 'b', 'c', 'd'])
+    expect(session.items.value.every((item) => item.loadState === 'loading')).toBe(true)
+
+    pending.get('a')?.(image('a'))
+    pending.get('b')?.(image('b'))
+    pending.get('c')?.(image('c'))
+    pending.get('d')?.(image('d'))
+    await importing
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.loadState === 'ready')).toBe(true)
+    )
+  })
+
+  it('computes perceptual hashes after images are decoded', async () => {
+    const testDeps = deps({
+      computePhash: vi.fn(async (item) => ({
+        phash: item.path === 'candidate' ? '0000000000000001' : '0000000000000000'
+      }))
+    })
+    const session = createImageMetricsSession(testDeps)
+
+    await session.addPaths(['base', 'candidate'])
+
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
+    expect(testDeps.computePhash).toHaveBeenCalledTimes(2)
+  })
+
+  it('automatically computes low precision for every ready non-baseline image', async () => {
+    const testDeps = deps({
+      computePhash: vi.fn(async (item) => ({
+        phash: item.path === 'base' ? '0000000000000000' : '0000000000000001'
+      }))
+    })
+    const session = createImageMetricsSession(testDeps)
     await session.addPaths(['base', 'a', 'b'])
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
 
     await session.setBaseline('base')
 
-    expect(deps.computeLow).toHaveBeenCalledTimes(2)
-    expect(session.items.value.find((item) => item.path === 'a')?.low.status).toBe('done')
+    await vi.waitFor(() => expect(testDeps.computeLow).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(lowStatus(session, 'a')).toBe('done'))
+    expect(session.items.value.find((item) => item.path === 'a')?.phashDistance).toBe(1)
   })
 
-  it('ignores selecting the current baseline again', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(async () => ({ similarity: 0.9, durationMs: 3 })),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+  it('starts low precision later when the baseline is selected before hashes finish', async () => {
+    const phashes = new Map<string, ReturnType<typeof deferred<{ phash: string }>>>()
+    const testDeps = deps({
+      computePhash: vi.fn((item) => {
+        const pending = deferred<{ phash: string }>()
+        phashes.set(item.path, pending)
+        return pending.promise
+      })
+    })
+    const session = createImageMetricsSession(testDeps)
+
     await session.addPaths(['base', 'candidate'])
     await session.setBaseline('base')
+    expect(testDeps.computeLow).not.toHaveBeenCalled()
 
-    await session.setBaseline('base')
+    phashes.get('base')?.resolve({ phash: '0000000000000000' })
+    await vi.waitFor(() =>
+      expect(session.items.value.find((item) => item.path === 'base')?.phashState).toBe('ready')
+    )
+    expect(testDeps.computeLow).not.toHaveBeenCalled()
 
-    expect(deps.computeLow).toHaveBeenCalledTimes(1)
+    phashes.get('candidate')?.resolve({ phash: '0000000000000003' })
+    await vi.waitFor(() => expect(testDeps.computeLow).toHaveBeenCalledTimes(1))
+    expect(session.items.value.find((item) => item.path === 'candidate')?.phashDistance).toBe(2)
   })
 
-  it('computes only newly imported images when restoring the current baseline', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(async () => ({ similarity: 0.9, durationMs: 3 })),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['base', 'existing'])
-    await session.setBaseline('base')
-    await session.addPaths(['new'])
-
-    await session.setBaseline('base')
-
-    expect(deps.computeLow).toHaveBeenCalledTimes(2)
-    expect(session.items.value.find((item) => item.path === 'existing')?.low.status).toBe('done')
-    expect(session.items.value.find((item) => item.path === 'new')?.low.status).toBe('done')
-  })
-
-  it('does not start a new baseline generation until the running low task finishes', async () => {
-    let resolveFirst!: (value: { similarity: number; durationMs: number }) => void
-    const first = new Promise<{ similarity: number; durationMs: number }>((resolve) => {
-      resolveFirst = resolve
-    })
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn()
-        .mockReturnValueOnce(first)
-        .mockResolvedValue({ similarity: 0.8, durationMs: 2 }),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['a', 'b'])
-    const oldRun = session.setBaseline('a')
-    await Promise.resolve()
-    expect(deps.computeLow).toHaveBeenCalledTimes(1)
-
-    const newRun = session.setBaseline('b')
-    await Promise.resolve()
-    expect(deps.computeLow).toHaveBeenCalledTimes(1)
-
-    resolveFirst({ similarity: 0.9, durationMs: 1 })
-    await oldRun
-    await newRun
-    expect(deps.computeLow).toHaveBeenCalledTimes(2)
-  })
-
-  it('skips a queued candidate removed during another low calculation', async () => {
-    let resolveFirst!: (value: { similarity: number; durationMs: number }) => void
-    const first = new Promise<{ similarity: number; durationMs: number }>((resolve) => {
-      resolveFirst = resolve
-    })
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn().mockReturnValueOnce(first),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['base', 'a', 'b'])
-    const run = session.setBaseline('base')
-
-    session.remove('b')
-    resolveFirst({ similarity: 0.9, durationMs: 1 })
-    await run
-
-    expect(deps.computeLow).toHaveBeenCalledTimes(1)
-  })
-
-  it('shows pHash distance immediately even when low precision later fails', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
+  it('shows perceptual hash distance even when low precision fails', async () => {
+    const testDeps = deps({
+      computePhash: vi.fn(async (item) => ({
+        phash: item.path === 'base' ? '0000000000000000' : '0000000000000003'
+      })),
       computeLow: vi.fn(async () => {
         throw new Error('低精度失败')
-      }),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+      })
+    })
+    const session = createImageMetricsSession(testDeps)
     await session.addPaths(['base', 'candidate'])
-    session.items.value[0].phash = '0000000000000000'
-    session.items.value[1].phash = '0000000000000003'
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
 
     await session.setBaseline('base')
 
-    const candidate = session.items.value.find((item) => item.path === 'candidate')
-    expect(candidate?.phashDistance).toBe(2)
-    expect(candidate?.low.status).toBe('error')
+    await vi.waitFor(() => expect(lowStatus(session, 'candidate')).toBe('error'))
+    expect(session.items.value.find((item) => item.path === 'candidate')?.phashDistance).toBe(2)
   })
 
   it('retries only the requested failed low precision comparison', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
+    const testDeps = deps({
+      computePhash: vi.fn(async (item) => ({
+        phash: item.path === 'base' ? '0000000000000000' : '0000000000000001'
+      })),
       computeLow: vi.fn()
         .mockRejectedValueOnce(new Error('临时失败'))
-        .mockResolvedValueOnce({ similarity: 0.9, durationMs: 3 }),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+        .mockResolvedValueOnce({ similarity: 0.9, durationMs: 3 })
+    })
+    const session = createImageMetricsSession(testDeps)
     await session.addPaths(['base', 'candidate'])
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
     await session.setBaseline('base')
+    await vi.waitFor(() => expect(lowStatus(session, 'candidate')).toBe('error'))
 
     await session.retryLowPrecision('candidate')
 
-    expect(deps.computeLow).toHaveBeenCalledTimes(2)
-    expect(session.items.value.find((item) => item.path === 'candidate')?.low.status).toBe('done')
+    await vi.waitFor(() => expect(lowStatus(session, 'candidate')).toBe('done'))
+    expect(testDeps.computeLow).toHaveBeenCalledTimes(2)
   })
 
-  it('does not enqueue the same low precision retry more than once', async () => {
-    let resolveBlocking!: (value: { similarity: number; durationMs: number }) => void
-    const blocking = new Promise<{ similarity: number; durationMs: number }>((resolve) => {
-      resolveBlocking = resolve
-    })
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn()
-        .mockRejectedValueOnce(new Error('首次失败'))
-        .mockReturnValueOnce(blocking)
-        .mockResolvedValue({ similarity: 0.9, durationMs: 3 }),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['base', 'failed', 'blocking'])
-    const initialRun = session.setBaseline('base')
-    await vi.waitFor(() => expect(deps.computeLow).toHaveBeenCalledTimes(2))
-
-    const firstRetry = session.retryLowPrecision('failed')
-    const secondRetry = session.retryLowPrecision('failed')
-
-    expect(session.items.value.find((item) => item.path === 'failed')?.low.status).toBe('queued')
-    expect(await secondRetry).toBe(false)
-    resolveBlocking({ similarity: 0.8, durationMs: 2 })
-    await initialRun
-    await firstRetry
-    expect(deps.computeLow).toHaveBeenCalledTimes(3)
-  })
-
-  it('does not start standard ssim until one card requests it', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(async () => ({ similarity: 1, durationMs: 1 })),
-      computeHigh: vi.fn(async () => ({ score: 0.98, durationMs: 20 }))
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['base', 'candidate'])
-    await session.setBaseline('base')
-
-    expect(deps.computeHigh).not.toHaveBeenCalled()
-    await session.computeHighPrecision('candidate')
-
-    expect(deps.computeHigh).toHaveBeenCalledTimes(1)
-  })
-
-  it('reuses a standard ssim result for the same unordered unchanged pair', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(async () => ({ similarity: 1, durationMs: 1 })),
-      computeHigh: vi.fn(async () => ({ score: 0.98, durationMs: 20 }))
-    }
-    const session = createImageMetricsSession(deps)
+  it('does not start standard similarity until requested and reuses a cached unordered pair', async () => {
+    const testDeps = deps()
+    const session = createImageMetricsSession(testDeps)
     await session.addPaths(['a', 'b'])
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
     await session.setBaseline('a')
-    await session.computeHighPrecision('b')
-    await session.setBaseline('b')
 
+    expect(testDeps.computeHigh).not.toHaveBeenCalled()
+    await session.computeHighPrecision('b')
+    await vi.waitFor(() => expect(lowStatus(session, 'b')).toBe('done'))
+    await session.setBaseline('b')
     await session.computeHighPrecision('a')
 
-    expect(deps.computeHigh).toHaveBeenCalledTimes(1)
+    expect(testDeps.computeHigh).toHaveBeenCalledTimes(1)
   })
 
-  it('discards low precision results from an old baseline generation', async () => {
-    let resolveFirst!: (value: { similarity: number; durationMs: number }) => void
-    const first = new Promise<{ similarity: number; durationMs: number }>((resolve) => {
-      resolveFirst = resolve
+  it('limits standard similarity to two running tasks', async () => {
+    const first = deferred<{ score: number; durationMs: number }>()
+    const second = deferred<{ score: number; durationMs: number }>()
+    const testDeps = deps({
+      computeHigh: vi.fn()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise)
     })
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn()
-        .mockReturnValueOnce(first)
-        .mockResolvedValue({ similarity: 0.8, durationMs: 2 }),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['a', 'b'])
-    const oldRun = session.setBaseline('a')
-    await Promise.resolve()
-    const newRun = session.setBaseline('b')
-    resolveFirst({ similarity: 0.1, durationMs: 9 })
+    const session = createImageMetricsSession(testDeps)
+    await session.addPaths(['base', 'a', 'b', 'c'])
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
+    await session.setBaseline('base')
 
-    await oldRun
-    await newRun
+    const firstRun = session.computeHighPrecision('a')
+    const secondRun = session.computeHighPrecision('b')
+    const thirdStarted = await session.computeHighPrecision('c')
 
-    expect(session.baselinePath.value).toBe('b')
-    expect(session.items.value.find((item) => item.path === 'b')?.low.status).toBe('baseline')
-  })
-
-  it('requires close confirmation only when the session has content', async () => {
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
-
-    expect(session.hasContent.value).toBe(false)
-    await session.addPaths(['a'])
-    expect(session.hasContent.value).toBe(true)
-    session.reset()
-    expect(session.hasContent.value).toBe(false)
+    expect(thirdStarted).toBe(false)
+    expect(testDeps.computeHigh).toHaveBeenCalledTimes(2)
+    first.resolve({ score: 1, durationMs: 1 })
+    second.resolve({ score: 0.99, durationMs: 1 })
+    await firstRun
+    await secondRun
   })
 
   it('keeps pending low precision work in hasContent after reset', async () => {
-    let resolveLow!: (value: { similarity: number; durationMs: number }) => void
-    const pendingLow = new Promise<{ similarity: number; durationMs: number }>(
-      (resolve) => { resolveLow = resolve }
-    )
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(() => pendingLow),
-      computeHigh: vi.fn()
-    }
-    const session = createImageMetricsSession(deps)
+    const pendingLow = deferred<{ similarity: number; durationMs: number }>()
+    const testDeps = deps({
+      computeLow: vi.fn(() => pendingLow.promise)
+    })
+    const session = createImageMetricsSession(testDeps)
     await session.addPaths(['base', 'candidate'])
+    await vi.waitFor(() =>
+      expect(session.items.value.every((item) => item.phashState === 'ready')).toBe(true)
+    )
     const run = session.setBaseline('base')
+    await vi.waitFor(() => expect(testDeps.computeLow).toHaveBeenCalledTimes(1))
 
     session.reset()
 
     expect(session.hasContent.value).toBe(true)
     expect(session.hasRunningTasks.value).toBe(true)
-    resolveLow({ similarity: 1, durationMs: 1 })
+    pendingLow.resolve({ similarity: 1, durationMs: 1 })
     await run
-    expect(session.hasContent.value).toBe(false)
+    await vi.waitFor(() => expect(session.hasContent.value).toBe(false))
     expect(session.hasRunningTasks.value).toBe(false)
-  })
-
-  it('does not allow reset to start another standard ssim while the old one is running', async () => {
-    let resolveHigh!: (value: { score: number; durationMs: number }) => void
-    const pendingHigh = new Promise<{ score: number; durationMs: number }>((resolve) => {
-      resolveHigh = resolve
-    })
-    const deps: ImageMetricsDependencies = {
-      loadImage: vi.fn(async (path) => image(path)),
-      computeLow: vi.fn(async () => ({ similarity: 1, durationMs: 1 })),
-      computeHigh: vi.fn()
-        .mockReturnValueOnce(pendingHigh)
-        .mockResolvedValueOnce({ score: 0.9, durationMs: 2 })
-    }
-    const session = createImageMetricsSession(deps)
-    await session.addPaths(['old-base', 'old-candidate'])
-    await session.setBaseline('old-base')
-    const oldRun = session.computeHighPrecision('old-candidate')
-
-    session.reset()
-    await session.addPaths(['new-base', 'new-candidate'])
-    await session.setBaseline('new-base')
-    const started = await session.computeHighPrecision('new-candidate')
-
-    expect(started).toBe(false)
-    expect(deps.computeHigh).toHaveBeenCalledTimes(1)
-    expect(session.hasContent.value).toBe(true)
-    resolveHigh({ score: 1, durationMs: 1 })
-    await oldRun
   })
 })

@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import type {
   TestImageInfo,
+  TestImagePhashResult,
   TestLowPrecisionResult,
   TestStandardSsimResult
 } from '@/api/imageMetrics'
@@ -13,6 +14,9 @@ export type MetricState<T> =
 
 export interface TestImageItem extends TestImageInfo {
   importOrder: number
+  loadState: 'loading' | 'ready'
+  phash: string
+  phashState: 'idle' | 'loading' | 'ready' | 'error'
   phashDistance: number | null
   low: MetricState<TestLowPrecisionResult>
   high: MetricState<TestStandardSsimResult>
@@ -20,6 +24,7 @@ export interface TestImageItem extends TestImageInfo {
 
 export interface ImageMetricsDependencies {
   loadImage(path: string): Promise<TestImageInfo>
+  computePhash(image: TestImageInfo): Promise<TestImagePhashResult>
   computeLow(
     baseline: TestImageInfo,
     candidate: TestImageInfo
@@ -38,25 +43,92 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-const IMPORT_CONCURRENCY = 3
+const IMPORT_CONCURRENCY = 4
+const PHASH_CONCURRENCY = 4
+const LOW_PRECISION_CONCURRENCY = 4
+const HIGH_PRECISION_CONCURRENCY = 2
 let activeImportCount = 0
 const importWaiters: Array<() => void> = []
+let activePhashCount = 0
+const phashWaiters: Array<() => void> = []
+let activeLowPrecisionCount = 0
+const lowPrecisionWaiters: Array<() => void> = []
 
-async function acquireImportPermit() {
-  if (activeImportCount < IMPORT_CONCURRENCY) {
-    activeImportCount += 1
+async function acquirePermit(
+  activeCount: () => number,
+  setActiveCount: (value: number) => void,
+  concurrency: number,
+  waiters: Array<() => void>
+) {
+  if (activeCount() < concurrency) {
+    setActiveCount(activeCount() + 1)
     return
   }
-  await new Promise<void>((resolve) => importWaiters.push(resolve))
+  await new Promise<void>((resolve) => waiters.push(resolve))
 }
 
-function releaseImportPermit() {
-  const next = importWaiters.shift()
+function releasePermit(
+  activeCount: () => number,
+  setActiveCount: (value: number) => void,
+  waiters: Array<() => void>
+) {
+  const next = waiters.shift()
   if (next) {
     next()
     return
   }
-  activeImportCount = Math.max(0, activeImportCount - 1)
+  setActiveCount(Math.max(0, activeCount() - 1))
+}
+
+function acquireImportPermit() {
+  return acquirePermit(
+    () => activeImportCount,
+    (value) => { activeImportCount = value },
+    IMPORT_CONCURRENCY,
+    importWaiters
+  )
+}
+
+function releaseImportPermit() {
+  releasePermit(
+    () => activeImportCount,
+    (value) => { activeImportCount = value },
+    importWaiters
+  )
+}
+
+function acquirePhashPermit() {
+  return acquirePermit(
+    () => activePhashCount,
+    (value) => { activePhashCount = value },
+    PHASH_CONCURRENCY,
+    phashWaiters
+  )
+}
+
+function releasePhashPermit() {
+  releasePermit(
+    () => activePhashCount,
+    (value) => { activePhashCount = value },
+    phashWaiters
+  )
+}
+
+function acquireLowPrecisionPermit() {
+  return acquirePermit(
+    () => activeLowPrecisionCount,
+    (value) => { activeLowPrecisionCount = value },
+    LOW_PRECISION_CONCURRENCY,
+    lowPrecisionWaiters
+  )
+}
+
+function releaseLowPrecisionPermit() {
+  releasePermit(
+    () => activeLowPrecisionCount,
+    (value) => { activeLowPrecisionCount = value },
+    lowPrecisionWaiters
+  )
 }
 
 function highPrecisionCacheKey(left: TestImageInfo, right: TestImageInfo) {
@@ -77,10 +149,34 @@ function phashDistance(left: string, right: string) {
   return distance
 }
 
+function displayNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path || '图片加载中'
+}
+
+function loadingItem(path: string, importOrder: number): TestImageItem {
+  return {
+    path,
+    fileName: displayNameFromPath(path),
+    fileSize: 0,
+    width: 0,
+    height: 0,
+    modifiedAtMs: 0,
+    phash: '',
+    phashState: 'idle',
+    thumbnailDataUrl: '',
+    importOrder,
+    loadState: 'loading',
+    phashDistance: null,
+    low: idle<TestLowPrecisionResult>(),
+    high: idle<TestStandardSsimResult>()
+  }
+}
+
 export function createImageMetricsSession(deps: ImageMetricsDependencies) {
   const items = ref<TestImageItem[]>([])
   const baselinePath = ref<string | null>(null)
   const loadingCount = ref(0)
+  const phashCount = ref(0)
   const lowPrecisionCount = ref(0)
   const highPrecisionCount = ref(0)
   const importErrors = ref<string[]>([])
@@ -89,15 +185,18 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
   let lifecycleGeneration = 0
   let comparisonGeneration = 0
   let nextImportOrder = 0
-  let lowQueue = Promise.resolve()
 
-  const highPrecisionBusy = computed(() => highPrecisionCount.value > 0)
+  const highPrecisionBusy = computed(() => highPrecisionCount.value >= HIGH_PRECISION_CONCURRENCY)
   const hasRunningTasks = computed(() =>
-    loadingCount.value > 0 || lowPrecisionCount.value > 0 || highPrecisionCount.value > 0
+    loadingCount.value > 0
+    || phashCount.value > 0
+    || lowPrecisionCount.value > 0
+    || highPrecisionCount.value > 0
   )
   const hasContent = computed(() =>
     items.value.length > 0
     || loadingCount.value > 0
+    || phashCount.value > 0
     || lowPrecisionCount.value > 0
     || highPrecisionCount.value > 0
   )
@@ -107,40 +206,110 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
     const importBaseOrder = nextImportOrder
     nextImportOrder += paths.length
     loadingCount.value += paths.length
+    const placeholders = paths.map((path, index) => loadingItem(path, importBaseOrder + index))
+    items.value.push(...placeholders)
+    items.value.sort((left, right) => left.importOrder - right.importOrder)
 
-    await Promise.all(paths.map(async (path, index) => {
+    await Promise.all(placeholders.map(async (placeholder) => {
       await acquireImportPermit()
       try {
         if (lifecycle !== lifecycleGeneration) return
-        const loaded = await deps.loadImage(path)
+        const loaded = await deps.loadImage(placeholder.path)
         if (lifecycle !== lifecycleGeneration) return
         const duplicate = items.value.some(
-          (item) => item.path.toLocaleLowerCase() === loaded.path.toLocaleLowerCase()
+          (item) => (
+            item.importOrder !== placeholder.importOrder
+            && item.loadState === 'ready'
+            && item.path.toLocaleLowerCase() === loaded.path.toLocaleLowerCase()
+          )
         )
         if (!duplicate) {
-          const item: TestImageItem = {
+          const index = items.value.findIndex(
+            (item) => item.importOrder === placeholder.importOrder
+          )
+          if (index < 0) return
+          const readyItem: TestImageItem = {
             ...loaded,
-            importOrder: importBaseOrder + index,
+            importOrder: placeholder.importOrder,
+            loadState: 'ready',
+            phash: '',
+            phashState: 'loading',
             phashDistance: null,
             low: idle<TestLowPrecisionResult>(),
             high: idle<TestStandardSsimResult>()
           }
-          items.value.push(item)
+          items.value[index] = readyItem
           items.value.sort((left, right) => (
             left.importOrder - right.importOrder
           ))
+          void computeImagePhash(readyItem, lifecycle)
         } else {
+          items.value = items.value.filter(
+            (item) => item.importOrder !== placeholder.importOrder
+          )
           duplicateCount.value += 1
         }
       } catch (error) {
         if (lifecycle === lifecycleGeneration) {
-          importErrors.value.push(`${path}：${errorMessage(error)}`)
+          items.value = items.value.filter(
+            (item) => item.importOrder !== placeholder.importOrder
+          )
+          importErrors.value.push(`${placeholder.path}：${errorMessage(error)}`)
         }
       } finally {
         releaseImportPermit()
         loadingCount.value = Math.max(0, loadingCount.value - 1)
       }
     }))
+  }
+
+  async function computeImagePhash(item: TestImageItem, lifecycle: number) {
+    phashCount.value += 1
+    await acquirePhashPermit()
+    try {
+      const result = await deps.computePhash(item)
+      if (lifecycle !== lifecycleGeneration) return
+      const current = items.value.find((candidate) => candidate.importOrder === item.importOrder)
+      if (!current || current.loadState !== 'ready') return
+      current.phash = result.phash
+      current.phashState = 'ready'
+      await refreshComparisonsForReadyItem(current)
+    } catch (error) {
+      if (lifecycle !== lifecycleGeneration) return
+      const current = items.value.find((candidate) => candidate.importOrder === item.importOrder)
+      if (!current) return
+      current.phashState = 'error'
+      importErrors.value.push(`${current.path}：${errorMessage(error)}`)
+    } finally {
+      releasePhashPermit()
+      phashCount.value = Math.max(0, phashCount.value - 1)
+    }
+  }
+
+  async function refreshComparisonsForReadyItem(item: TestImageItem) {
+    const baseline = items.value.find(
+      (candidate) => candidate.path === baselinePath.value && candidate.loadState === 'ready'
+    )
+    if (!baseline || baseline.phashState !== 'ready') return
+
+    if (item.path === baseline.path) {
+      for (const candidate of items.value) {
+        if (candidate.path === baseline.path || candidate.loadState !== 'ready' || candidate.phashState !== 'ready') {
+          continue
+        }
+        candidate.phashDistance = phashDistance(baseline.phash, candidate.phash)
+        if (candidate.low.status === 'idle') {
+          void computeLowPrecision(baseline, candidate, comparisonGeneration)
+        }
+      }
+      return
+    }
+
+    if (item.phashState !== 'ready') return
+    item.phashDistance = phashDistance(baseline.phash, item.phash)
+    if (item.low.status === 'idle' || item.low.status === 'queued') {
+      void computeLowPrecision(baseline, item, comparisonGeneration)
+    }
   }
 
   async function computeLowPrecision(
@@ -150,7 +319,8 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
   ) {
     candidate.low = { status: 'queued' }
     lowPrecisionCount.value += 1
-    const run = lowQueue.then(async () => {
+    await acquireLowPrecisionPermit()
+    try {
       if (
         comparison !== comparisonGeneration
         || baselinePath.value !== baseline.path
@@ -171,22 +341,24 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
           candidate.low = { status: 'error', error: errorMessage(error) }
         }
       }
-    })
-    lowQueue = run.catch(() => undefined)
-    try {
-      await run
     } finally {
+      releaseLowPrecisionPermit()
       lowPrecisionCount.value = Math.max(0, lowPrecisionCount.value - 1)
     }
   }
 
   async function setBaseline(path: string) {
-    const baseline = items.value.find((item) => item.path === path)
+    const baseline = items.value.find((item) => item.path === path && item.loadState === 'ready')
     if (!baseline) return
 
     if (baselinePath.value === path) {
       const newCandidates = items.value.filter(
-        (item) => item.path !== path && item.low.status === 'idle'
+        (item) => (
+          item.loadState === 'ready'
+          && item.phashState === 'ready'
+          && item.path !== path
+          && item.low.status === 'idle'
+        )
       )
       for (const item of newCandidates) {
         item.phashDistance = phashDistance(baseline.phash, item.phash)
@@ -202,22 +374,39 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
     const comparison = comparisonGeneration
     baselinePath.value = path
     for (const item of items.value) {
-      item.phashDistance = item.path === path ? null : phashDistance(baseline.phash, item.phash)
-      item.low = item.path === path ? { status: 'baseline' } : { status: 'queued' }
+      if (item.loadState !== 'ready') continue
+      item.phashDistance = item.path === path || item.phashState !== 'ready'
+        ? null
+        : phashDistance(baseline.phash, item.phash)
+      item.low = item.path === path
+        ? { status: 'baseline' }
+        : item.phashState === 'ready' && baseline.phashState === 'ready'
+          ? { status: 'queued' }
+          : idle<TestLowPrecisionResult>()
       item.high = item.path === path
         ? { status: 'baseline' }
         : idle<TestStandardSsimResult>()
     }
 
     for (const item of items.value) {
-      if (item.path === path || comparison !== comparisonGeneration) continue
-      await computeLowPrecision(baseline, item, comparison)
+      if (
+        item.loadState !== 'ready'
+        || item.phashState !== 'ready'
+        || baseline.phashState !== 'ready'
+        || item.path === path
+        || comparison !== comparisonGeneration
+      ) {
+        continue
+      }
+      void computeLowPrecision(baseline, item, comparison)
     }
   }
 
   async function retryLowPrecision(path: string) {
-    const baseline = items.value.find((item) => item.path === baselinePath.value)
-    const candidate = items.value.find((item) => item.path === path)
+    const baseline = items.value.find(
+      (item) => item.path === baselinePath.value && item.loadState === 'ready'
+    )
+    const candidate = items.value.find((item) => item.path === path && item.loadState === 'ready')
     if (
       !baseline
       || !candidate
@@ -232,8 +421,10 @@ export function createImageMetricsSession(deps: ImageMetricsDependencies) {
   }
 
   async function computeHighPrecision(path: string) {
-    const baseline = items.value.find((item) => item.path === baselinePath.value)
-    const candidate = items.value.find((item) => item.path === path)
+    const baseline = items.value.find(
+      (item) => item.path === baselinePath.value && item.loadState === 'ready'
+    )
+    const candidate = items.value.find((item) => item.path === path && item.loadState === 'ready')
     if (!baseline || !candidate || baseline.path === candidate.path || highPrecisionBusy.value) {
       return false
     }

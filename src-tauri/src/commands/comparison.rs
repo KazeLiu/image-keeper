@@ -1,3 +1,4 @@
+use crate::core::algorithm_profile::CURRENT_ALGORITHM_PROFILE_ID;
 use crate::db::models::{AnalysisType, ComparisonStats, RunStatus};
 use crate::db::repository::{Repository, RunConfig};
 use crate::error::{AppError, Result};
@@ -79,7 +80,7 @@ pub struct ComparisonResultRow {
     pub computed_at: i64,
 }
 
-/// pHash 粗分组
+/// 感知哈希粗分组
 #[derive(Debug, serde::Serialize)]
 pub struct ComparisonGroup {
     pub group_index: usize,
@@ -1140,7 +1141,12 @@ fn compute_similarity_from_cached_images(
     }
 
     if use_high_precision {
-        return compute_structural_similarity_from_cached_images(left, right);
+        use crate::core::ssim::standard::StandardSsim;
+
+        return StandardSsim::compute_owned(
+            cached_similarity_image_to_dynamic_image(left)?,
+            cached_similarity_image_to_dynamic_image(right)?,
+        );
     }
 
     let mut sum_diff_sq = 0.0;
@@ -1159,66 +1165,20 @@ fn compute_similarity_from_cached_images(
     Ok(1.0 - (mse / max_value).min(1.0))
 }
 
-fn compute_structural_similarity_from_cached_images(
-    left: &CachedSimilarityImage,
-    right: &CachedSimilarityImage,
-) -> Result<f64> {
-    let channels = left.channels as usize;
-    if channels == 0 || left.pixels.is_empty() {
-        return Err(AppError::SsimComputation("图片像素为空".to_string()));
+fn cached_similarity_image_to_dynamic_image(
+    image: &CachedSimilarityImage,
+) -> Result<image::DynamicImage> {
+    match image.channels {
+        1 => image::GrayImage::from_raw(image.width, image.height, (*image.pixels).clone())
+            .map(image::DynamicImage::ImageLuma8)
+            .ok_or_else(|| AppError::SsimComputation("图片像素不完整".to_string())),
+        3 => image::RgbImage::from_raw(image.width, image.height, (*image.pixels).clone())
+            .map(image::DynamicImage::ImageRgb8)
+            .ok_or_else(|| AppError::SsimComputation("图片像素不完整".to_string())),
+        channels => Err(AppError::SsimComputation(format!(
+            "不支持的图片通道数: {channels}"
+        ))),
     }
-
-    let pixel_count = left.pixels.len() / channels;
-    if pixel_count == 0 {
-        return Err(AppError::SsimComputation("图片像素为空".to_string()));
-    }
-
-    let c1 = (0.01_f64 * 255.0).powi(2);
-    let c2 = (0.03_f64 * 255.0).powi(2);
-    let mut score_sum = 0.0;
-
-    for channel in 0..channels {
-        let mut left_sum = 0.0;
-        let mut right_sum = 0.0;
-
-        for pixel_index in 0..pixel_count {
-            let index = pixel_index * channels + channel;
-            left_sum += left.pixels[index] as f64;
-            right_sum += right.pixels[index] as f64;
-        }
-
-        let n = pixel_count as f64;
-        let left_mean = left_sum / n;
-        let right_mean = right_sum / n;
-        let mut left_var = 0.0;
-        let mut right_var = 0.0;
-        let mut covariance = 0.0;
-
-        for pixel_index in 0..pixel_count {
-            let index = pixel_index * channels + channel;
-            let left_delta = left.pixels[index] as f64 - left_mean;
-            let right_delta = right.pixels[index] as f64 - right_mean;
-            left_var += left_delta * left_delta;
-            right_var += right_delta * right_delta;
-            covariance += left_delta * right_delta;
-        }
-
-        left_var /= n;
-        right_var /= n;
-        covariance /= n;
-
-        let numerator = (2.0 * left_mean * right_mean + c1) * (2.0 * covariance + c2);
-        let denominator =
-            (left_mean.powi(2) + right_mean.powi(2) + c1) * (left_var + right_var + c2);
-        let channel_score = if denominator == 0.0 {
-            1.0
-        } else {
-            (numerator / denominator).clamp(0.0, 1.0)
-        };
-        score_sum += channel_score;
-    }
-
-    Ok(score_sum / channels as f64)
 }
 
 fn compute_group_similarity_pair(
@@ -1605,7 +1565,7 @@ pub async fn start_multi_compare(
 
     // 2. 准备配置
     let app_version = env!("CARGO_PKG_VERSION").to_string();
-    let algorithm_profile_id = "imagekeeper-v1-ssim".to_string();
+    let algorithm_profile_id = CURRENT_ALGORITHM_PROFILE_ID.to_string();
 
     let baseline_alias = "A".to_string();
     let comparison_aliases: Vec<String> = (0..request.comparison_paths.len())
@@ -1741,7 +1701,7 @@ pub async fn get_comparison_results(
     read_comparison_results(&repo_lock, &run_id)
 }
 
-/// 获取 pHash 粗分组和组内 SSIM 决策信息
+/// 获取感知哈希粗分组和组内结构相似性决策信息
 #[tauri::command]
 pub async fn get_comparison_groups(
     run_id: String,
@@ -1752,7 +1712,7 @@ pub async fn get_comparison_groups(
     read_comparison_groups(&repo_lock, &run_id, grouping_distance)
 }
 
-/// 获取当前组内图片两两相似度，用于前端做“缩略图挂到最像原图”的交叉验证。
+/// 获取当前组内图片两两相似度，用于前端做“缩略图挂到最像原图”的交叉验证
 #[tauri::command]
 pub async fn get_group_similarity_scores(
     run_id: String,
@@ -1809,7 +1769,10 @@ pub async fn delete_comparison_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::phash::PHASH_ALGORITHM_VERSION;
+    use crate::core::ssim::standard::StandardSsim;
     use crate::db::{repository::RunConfig, schema};
+    use image::{DynamicImage, RgbImage};
     use rusqlite::Connection;
 
     fn create_test_repo() -> Repository {
@@ -1902,9 +1865,9 @@ mod tests {
             })
             .unwrap();
 
-        repo.update_image_hash(baseline_id, "hash-a", "phash-a", "phash-v1")
+        repo.update_image_hash(baseline_id, "hash-a", "phash-a", PHASH_ALGORITHM_VERSION)
             .unwrap();
-        repo.update_image_hash(comparison_id, "hash-b", "phash-b", "phash-v1")
+        repo.update_image_hash(comparison_id, "hash-b", "phash-b", PHASH_ALGORITHM_VERSION)
             .unwrap();
         repo.insert_analysis_result(&AnalysisResultInsert {
             run_id: "run-1".to_string(),
@@ -1996,9 +1959,9 @@ mod tests {
             })
             .unwrap();
 
-        repo.update_image_hash(baseline_id, "hash-a", "phash-a", "phash-v1")
+        repo.update_image_hash(baseline_id, "hash-a", "phash-a", PHASH_ALGORITHM_VERSION)
             .unwrap();
-        repo.update_image_hash(comparison_id, "hash-b", "phash-b", "phash-v1")
+        repo.update_image_hash(comparison_id, "hash-b", "phash-b", PHASH_ALGORITHM_VERSION)
             .unwrap();
         repo.insert_analysis_result(&AnalysisResultInsert {
             run_id: "run-1".to_string(),
@@ -2084,9 +2047,9 @@ mod tests {
             })
             .unwrap();
 
-        repo.update_image_hash(baseline_id, "hash-a", "phash-a", "phash-v1")
+        repo.update_image_hash(baseline_id, "hash-a", "phash-a", PHASH_ALGORITHM_VERSION)
             .unwrap();
-        repo.update_image_hash(comparison_id, "hash-b", "phash-b", "phash-v1")
+        repo.update_image_hash(comparison_id, "hash-b", "phash-b", PHASH_ALGORITHM_VERSION)
             .unwrap();
 
         repo.insert_analysis_result(&AnalysisResultInsert {
@@ -2156,8 +2119,13 @@ mod tests {
                 })
                 .unwrap();
 
-            repo.update_image_hash(image_id, &format!("hash-{idx}"), phash, "phash-v1")
-                .unwrap();
+            repo.update_image_hash(
+                image_id,
+                &format!("hash-{idx}"),
+                phash,
+                PHASH_ALGORITHM_VERSION,
+            )
+            .unwrap();
         }
 
         let groups = read_comparison_groups(&repo, "run-1", None).unwrap();
@@ -2210,8 +2178,13 @@ mod tests {
                 })
                 .unwrap();
 
-            repo.update_image_hash(image_id, &format!("hash-{idx}"), phash, "phash-v1")
-                .unwrap();
+            repo.update_image_hash(
+                image_id,
+                &format!("hash-{idx}"),
+                phash,
+                PHASH_ALGORITHM_VERSION,
+            )
+            .unwrap();
         }
 
         let default_groups = read_comparison_groups(&repo, "run-1", None).unwrap();
@@ -2365,7 +2338,7 @@ mod tests {
     }
 
     #[test]
-    fn high_precision_similarity_uses_color_information() {
+    fn high_precision_similarity_matches_standard_similarity_algorithm() {
         let red = CachedSimilarityImage {
             width: 2,
             height: 1,
@@ -2378,12 +2351,17 @@ mod tests {
             channels: 3,
             pixels: Arc::new(vec![0, 255, 0, 0, 255, 0]),
         };
+        let red_image =
+            DynamicImage::ImageRgb8(RgbImage::from_raw(2, 1, (*red.pixels).clone()).unwrap());
+        let green_image =
+            DynamicImage::ImageRgb8(RgbImage::from_raw(2, 1, (*green.pixels).clone()).unwrap());
+        let expected = StandardSsim::compute_owned(red_image, green_image).unwrap();
 
         let score = compute_similarity_from_cached_images(&red, &green, true).unwrap();
 
         assert!(
-            score < 0.5,
-            "高精度模式应该能识别颜色信息差异，实际分数为 {score}"
+            (score - expected).abs() < 1e-12,
+            "组内标准结构相似性应该复用统一算法，实际 {score}，期望 {expected}"
         );
     }
 }

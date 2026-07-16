@@ -6,7 +6,6 @@
         <h1>找差分图</h1>
         <p>添加多张参考图，只扫描目录一次，再集中整理所有命中图片。</p>
       </div>
-      <el-tag type="primary" effect="plain">独立小工具</el-tag>
     </header>
 
     <main class="finder-main">

@@ -1,16 +1,16 @@
 use crate::error::{AppError, Result};
 use image::DynamicImage;
 
-/// SSIM 计算器
+/// 结构相似性计算器
 ///
-/// 注意：这是一个简化的 SSIM 实现
-/// 完整的生产级实现建议使用 OpenCV 或专门的 SSIM 库
+/// 注意：这是一个简化的结构相似性实现
+/// 完整的生产级实现建议使用 OpenCV 或专门的结构相似性库
 pub struct SsimComputer;
 
 impl SsimComputer {
     const MAX_SSIM_EDGE: u32 = 512;
 
-    /// 计算两张图片的 SSIM 相似度
+    /// 计算两张图片的结构相似性
     ///
     /// 返回值范围: 0.0 ~ 1.0, 1.0 表示完全相同
     pub fn compute(img1: &DynamicImage, img2: &DynamicImage) -> Result<f64> {
@@ -23,9 +23,9 @@ impl SsimComputer {
         let gray1 = img1.to_luma8();
         let gray2 = img2.to_luma8();
 
-        // 简化的 SSIM 计算
+        // 简化的结构相似性计算
         // 这里使用均方误差的简化版本
-        // 生产环境建议使用完整的 SSIM 算法或 OpenCV
+        // 生产环境建议使用完整的结构相似性算法或 OpenCV
         let pixels1 = gray1.as_raw();
         let pixels2 = gray2.as_raw();
 
@@ -47,7 +47,7 @@ impl SsimComputer {
         Ok(similarity)
     }
 
-    /// 计算两个文件的 SSIM
+    /// 计算两个文件的结构相似性
     ///
     /// large_path: 大图路径
     /// small_path: 小图路径
@@ -75,11 +75,11 @@ impl SsimComputer {
         let large_img_resized =
             ImageResizer::load_and_resize(large_path, target_width, target_height)?;
 
-        // 计算 SSIM
+        // 计算结构相似性
         Self::compute(&large_img_resized, &small_img_resized)
     }
 
-    /// 根据较小图片尺寸计算 SSIM 归一化目标尺寸，并限制最大边长。
+    /// 根据较小图片尺寸计算结构相似性归一化目标尺寸，并限制最大边长。
     pub fn target_dimensions(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
         if width == 0 || height == 0 || max_edge == 0 {
             return (width.max(1), height.max(1));
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_compute_identical_images() {
-        // 两张完全相同的图片，SSIM 应该接近 1.0
+        // 两张完全相同的图片，结构相似性应该接近 1.0
         let img1 = DynamicImage::new_rgb8(100, 100);
         let img2 = DynamicImage::new_rgb8(100, 100);
 

@@ -10,7 +10,7 @@ const C2: f64 = 58.5225;
 pub struct StandardSsim;
 
 impl StandardSsim {
-    /// 使用 11×11、sigma=1.5 的高斯窗口计算灰度 SSIM。
+    /// 使用 11×11、sigma=1.5 的高斯窗口计算灰度结构相似性。
     ///
     /// 边界像素采用镜像延拓；返回值不裁剪，因此标准公式产生的负值会被保留。
     pub fn compute(left: &DynamicImage, right: &DynamicImage) -> Result<f64> {
@@ -18,7 +18,7 @@ impl StandardSsim {
         Self::compute_gray(left.to_luma8(), right.to_luma8())
     }
 
-    /// 消费已解码图片计算 SSIM，允许调用方在转灰度时立即释放彩色原图。
+    /// 消费已解码图片计算结构相似性，允许调用方在转灰度时立即释放彩色原图。
     pub fn compute_owned(left: DynamicImage, right: DynamicImage) -> Result<f64> {
         Self::validate_dimensions(&left, &right)?;
         Self::compute_gray(left.into_luma8(), right.into_luma8())
@@ -54,7 +54,7 @@ impl StandardSsim {
                     let weight = kernel[(offset + WINDOW_RADIUS) as usize];
                     let horizontal = horizontal_rows
                         .get(&source_y)
-                        .expect("所需的 SSIM 横向统计行必须已缓存")[x];
+                        .expect("所需的结构相似性横向统计行必须已缓存")[x];
                     for index in 0..stats.len() {
                         stats[index] += weight * horizontal[index];
                     }

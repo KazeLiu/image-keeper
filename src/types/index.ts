@@ -296,7 +296,7 @@ export interface ComparisonResultRow {
   computed_at: number
 }
 
-/** pHash 粗分组 */
+/** 感知哈希粗分组 */
 export interface ComparisonGroup {
   group_index: number
   representative_image_id: number

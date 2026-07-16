@@ -33,7 +33,7 @@ pub enum AppError {
     #[error("哈希计算失败: {0}")]
     HashComputation(String),
 
-    #[error("SSIM计算失败: {0}")]
+    #[error("结构相似性计算失败: {0}")]
     SsimComputation(String),
 
     #[error("文件系统操作失败: {0}")]

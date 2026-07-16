@@ -42,7 +42,7 @@
         <span class="compact-task-content">
           <span class="compact-task-title">图片指标测试</span>
           <span class="compact-task-copy">
-            临时比较多张图片的 pHash、当前相似度与标准 SSIM，不保存记录
+            临时比较多张图片的感知哈希、当前相似度与标准结构相似性，不保存记录
           </span>
         </span>
         <span class="compact-task-action">打开独立窗口</span>

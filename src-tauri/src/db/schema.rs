@@ -1,3 +1,4 @@
+use crate::core::algorithm_profile::CURRENT_ALGORITHM_PROFILE_ID;
 use crate::error::Result;
 use rusqlite::Connection;
 
@@ -275,6 +276,14 @@ INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES
 /// 初始化数据库
 pub fn initialize_database(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
+    conn.execute(
+        r#"INSERT OR IGNORE INTO algorithm_profiles
+            (profile_id, hash_algorithm, phash_algorithm, phash_hash_size, ssim_window_size,
+             normalization_version, resize_algorithm, created_at)
+           VALUES
+            (?1, 'blake3', 'dct-gradient-combined', 8, 11, 1, 'lanczos3', strftime('%s', 'now'))"#,
+        [CURRENT_ALGORITHM_PROFILE_ID],
+    )?;
     Ok(())
 }
 
@@ -301,5 +310,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(table_count, 9, "应该创建 9 个核心表");
+
+        let current_profile_count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM algorithm_profiles WHERE profile_id = ?1",
+                [CURRENT_ALGORITHM_PROFILE_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(current_profile_count, 1, "应该写入当前算法配置");
     }
 }

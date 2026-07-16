@@ -50,7 +50,7 @@ impl ExportManager {
         // CSV 表头
         writeln!(
             writer,
-            "保留文件,删除文件,删除原因,Hash,SSIM,宽度,高度,文件大小"
+            "保留文件,删除文件,删除原因,Hash,结构相似性,宽度,高度,文件大小"
         )?;
 
         // 查询回收站数据

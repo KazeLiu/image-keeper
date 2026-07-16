@@ -1,3 +1,4 @@
+use crate::core::algorithm_profile::CURRENT_ALGORITHM_PROFILE_ID;
 use crate::db::models::{FolderRole, RunStatus, ScanProgressEvent};
 use crate::db::repository::Repository;
 use crate::error::{AppError, Result};
@@ -473,7 +474,7 @@ impl WorkflowEngine {
                     aspect_diff: None,
                     direction_smaller_resolution: false,
                     direction_smaller_filesize: false,
-                    algorithm_profile_id: "v1".to_string(),
+                    algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
                     analysis_metadata: None,
                 };
 
@@ -513,7 +514,7 @@ impl WorkflowEngine {
                 phase: "candidate_search".to_string(),
                 total_files: 0,
                 processed_files: 0,
-                current_file: Some("候选筛选 (pHash)".to_string()),
+                current_file: Some("候选筛选（感知哈希）".to_string()),
             })
             .await;
 
@@ -548,7 +549,7 @@ impl WorkflowEngine {
 
         // 2. 对每个未匹配的对比图片查找候选
         for comp_img in unmatched_images {
-            // 跳过没有 pHash 的图片
+            // 跳过没有感知哈希的图片
             let Some(ref comp_phash) = comp_img.phash else {
                 processed += 1;
                 continue;
@@ -562,7 +563,7 @@ impl WorkflowEngine {
             let baseline_candidates =
                 Self::filter_self_matches(&comp_img, baseline_candidates, options);
 
-            // 2.2 使用 pHash 匹配找到候选
+            // 2.2 使用感知哈希匹配找到候选
             let (candidates, truncated) = matcher.find_candidates(comp_phash, &baseline_candidates);
 
             // 2.3 如果没有候选，创建 no_baseline_match 结果
@@ -584,7 +585,7 @@ impl WorkflowEngine {
                     aspect_diff: None,
                     direction_smaller_resolution: false,
                     direction_smaller_filesize: false,
-                    algorithm_profile_id: "v1".to_string(),
+                    algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
                     analysis_metadata: None,
                 };
 
@@ -594,7 +595,7 @@ impl WorkflowEngine {
                 // 2.4 保存候选信息到临时表（为 Phase 4 准备）
                 // 暂时不创建分析结果，等 Phase 5 分类后再创建
                 // 这里我们将候选信息存储到内存或临时表
-                // 简化实现：直接标记为 NotEvaluated，等 Phase 4 计算 SSIM 后更新
+                // 简化实现：直接标记为 NotEvaluated，等 Phase 4 计算结构相似性后更新
                 use crate::db::models::AnalysisType;
                 use crate::db::repository::AnalysisResultInsert;
 
@@ -616,7 +617,7 @@ impl WorkflowEngine {
                     aspect_diff: None,
                     direction_smaller_resolution: false,
                     direction_smaller_filesize: false,
-                    algorithm_profile_id: "v1".to_string(),
+                    algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
                     analysis_metadata: None,
                 };
 
@@ -660,11 +661,11 @@ impl WorkflowEngine {
                 phase: "scoring".to_string(),
                 total_files: 0,
                 processed_files: 0,
-                current_file: Some("计算相似度 (SSIM)".to_string()),
+                current_file: Some("计算结构相似性".to_string()),
             })
             .await;
 
-        // 1. 获取待计算 SSIM 的候选对
+        // 1. 获取待计算结构相似性的候选对
         let pending_pairs = {
             let repo = self.repository.lock().unwrap();
             repo.get_pending_ssim_results(run_id)?
@@ -679,14 +680,14 @@ impl WorkflowEngine {
                 phase: "scoring".to_string(),
                 total_files: total as i64,
                 processed_files: 0,
-                current_file: Some(format!("准备计算相似度: 0/{}", total)),
+                current_file: Some(format!("准备计算结构相似性: 0/{}", total)),
             })
             .await;
 
         use crate::core::ssim::SsimEngine;
         use std::path::Path;
 
-        // 2. 计算每个候选对的 SSIM
+        // 2. 计算每个候选对的结构相似性
         for pair in pending_pairs {
             let _ = progress_tx
                 .send(ScanProgressEvent {
@@ -695,7 +696,7 @@ impl WorkflowEngine {
                     total_files: total as i64,
                     processed_files: processed as i64,
                     current_file: Some(format!(
-                        "计算相似度 {}/{}: {}",
+                        "计算结构相似性 {}/{}: {}",
                         processed + 1,
                         total,
                         Path::new(&pair.comparison_path)
@@ -744,7 +745,7 @@ impl WorkflowEngine {
                 }
                 Err(e) => {
                     eprintln!(
-                        "计算 SSIM 失败: {} <-> {}: {}",
+                        "计算结构相似性失败: {} <-> {}: {}",
                         pair.comparison_path, pair.baseline_path, e
                     );
                     // 失败时保持 not_evaluated 状态
@@ -760,7 +761,7 @@ impl WorkflowEngine {
                     phase: "scoring".to_string(),
                     total_files: total as i64,
                     processed_files: processed as i64,
-                    current_file: Some(format!("计算相似度: {}/{}", processed, total)),
+                    current_file: Some(format!("计算结构相似性: {}/{}", processed, total)),
                 })
                 .await;
         }
@@ -923,7 +924,7 @@ mod tests {
             repo.create_run(
                 run_id,
                 "test",
-                "imagekeeper-v1-ssim",
+                CURRENT_ALGORITHM_PROFILE_ID,
                 image_dir.to_string_lossy().as_ref(),
                 "A",
                 &[image_dir.to_string_lossy().to_string()],

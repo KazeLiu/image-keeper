@@ -12,7 +12,7 @@
                 class="precision-summary"
                 :class="useHighPrecisionSimilarity ? 'is-high' : 'is-fast'"
               >
-                {{ useHighPrecisionSimilarity ? '高精度' : '低精度' }}
+                {{ useHighPrecisionSimilarity ? '标准结构相似性' : '低精度' }}
               </span>
             </div>
           </div>
@@ -77,13 +77,13 @@
                     <el-switch
                       :model-value="useHighPrecisionSimilarity"
                       size="small"
-                      active-text="高精度"
+                      active-text="标准结构相似性"
                       inactive-text="低精度"
                       @change="handlePrecisionModeChange"
                     />
                   </div>
                   <div class="quality-help">
-                    低精度速度更快，适合大批量图片；高精度会保留颜色信息重新判断，相似度更细，但等待时间会明显变长。
+                    低精度速度更快，适合大批量图片；标准结构相似性会使用更完整的窗口算法重新判断，相似度更细，但等待时间会明显变长。
                   </div>
                 </div>
               </div>
@@ -290,6 +290,7 @@
                         class="compact-action-button"
                         type="primary"
                         link
+                        title="复制当前路径"
                         @click.stop="copyFolderPath(candidate.member)"
                       >
                         复制
@@ -298,6 +299,7 @@
                         class="compact-action-button"
                         type="primary"
                         link
+                        title="使用资源管理器打开"
                         @click.stop="openFolder(candidate.member)"
                       >
                         打开
@@ -392,6 +394,7 @@
                 class="compact-action-button"
                 type="primary"
                 link
+                title="复制当前路径"
                 @click.stop="copyFolderPath(row.member)"
               >
                 复制
@@ -400,6 +403,7 @@
                 class="compact-action-button"
                 type="primary"
                 link
+                title="使用资源管理器打开"
                 @click.stop="openFolder(row.member)"
               >
                 打开
@@ -866,10 +870,10 @@ async function handlePrecisionModeChange(value: string | number | boolean) {
   if (nextValue) {
     try {
       await ElMessageBox.confirm(
-        '高精度会保留颜色信息重新比对当前组，相似度判断更细，但会明显拉长等待时间。是否开启？',
-        '开启高精度相似度对比',
+        '标准结构相似性会使用更完整的窗口算法重新比对当前组，相似度判断更细，但会明显拉长等待时间。是否开启？',
+        '开启标准结构相似性对比',
         {
-          confirmButtonText: '开启高精度',
+          confirmButtonText: '开启标准结构相似性',
           cancelButtonText: '继续低精度',
           type: 'warning'
         }
@@ -884,7 +888,7 @@ async function handlePrecisionModeChange(value: string | number | boolean) {
   rememberHighPrecisionSimilarity(nextValue)
   groupSimilarityScoreCache.clear()
   groupSimilarityScores.value = []
-  ElMessage.info(nextValue ? '已切换为高精度，将重新计算当前组' : '已切换为低精度，将重新计算当前组')
+  ElMessage.info(nextValue ? '已切换为标准结构相似性，将重新计算当前组' : '已切换为低精度，将重新计算当前组')
   await loadGroupCrossCheckScores()
 }
 
@@ -1681,6 +1685,7 @@ function resetImageViewerZoom() {
   margin: 0;
   display: flex;
   flex-direction: column;
+  margin:auto;
 }
 
 :deep(.image-viewer-dialog .el-dialog__body) {

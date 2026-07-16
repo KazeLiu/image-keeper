@@ -524,7 +524,7 @@ impl Repository {
         Ok(images)
     }
 
-    /// 获取需要计算 SSIM 的候选对（Phase 4 使用）
+    /// 获取需要计算结构相似性的候选对（Phase 4 使用）
     pub fn get_pending_ssim_results(&self, run_id: &str) -> Result<Vec<PendingSsimPair>> {
         let mut stmt = self.conn.prepare(
             r#"SELECT
@@ -574,7 +574,7 @@ impl Repository {
         Ok(pairs)
     }
 
-    /// 更新分析结果的 SSIM 分数和方向性（Phase 4 使用）
+    /// 更新分析结果的结构相似性分数和方向性（Phase 4 使用）
     pub fn update_analysis_ssim(
         &self,
         result_id: i64,
@@ -1331,7 +1331,7 @@ pub struct AnalysisResultInsert {
     pub analysis_metadata: Option<String>,
 }
 
-/// 待计算 SSIM 的配对
+/// 待计算结构相似性的配对
 pub struct PendingSsimPair {
     pub result_id: i64,
     pub comparison_image_id: i64,

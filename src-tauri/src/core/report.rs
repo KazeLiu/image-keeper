@@ -357,8 +357,8 @@ impl<'a> ReportGenerator<'a> {
         writeln!(file, "        <th>对比图片</th>")?;
         writeln!(file, "        <th>分类</th>")?;
         writeln!(file, "        <th>主匹配</th>")?;
-        writeln!(file, "        <th>pHash</th>")?;
-        writeln!(file, "        <th>SSIM</th>")?;
+        writeln!(file, "        <th>感知哈希</th>")?;
+        writeln!(file, "        <th>结构相似性</th>")?;
         writeln!(file, "        <th>审核状态</th>")?;
         writeln!(file, "      </tr>")?;
 

@@ -2,107 +2,127 @@
   <main class="metrics-window">
     <header class="window-header">
       <div>
+        <p class="eyebrow">IMAGEKEEPER TOOL</p>
         <h1>图片指标测试</h1>
-        <p>临时比较多张图片，关闭窗口后不会保存任何内容。</p>
+        <p>点击一张图片卡片，将它设为标准图</p>
       </div>
-      <el-button
-        :icon="Close"
-        data-test="close-window"
-        aria-label="关闭图片指标测试窗口"
-        @click="requestClose"
-      >
-        关闭
-      </el-button>
+      <div class="header-actions">
+        <el-popover
+          v-model:visible="guidePopoverVisible"
+          trigger="click"
+          placement="bottom-end"
+          :width="580"
+        >
+          <template #reference>
+            <el-button :icon="InfoFilled" plain size="small">
+              指标说明
+            </el-button>
+          </template>
+
+          <div class="guide-content">
+            <div class="guide-card">
+              <div class="guide-heading">感知哈希距离</div>
+              <div class="guide-help">
+                范围 0–64，越小表示视觉特征越接近；0 不代表文件或像素完全一致。
+              </div>
+            </div>
+
+            <div class="guide-card">
+              <div class="guide-heading">低精度结构相似性</div>
+              <div class="guide-help">
+                范围 0–1，越接近 1 越相似；复现主程序当前的灰度像素差算法。
+              </div>
+            </div>
+
+            <div class="guide-card">
+              <div class="guide-heading">标准结构相似性</div>
+              <div class="guide-help">
+                越接近 1 通常越相似，标准公式可能出现负值；仅在点击单张卡片后计算。
+              </div>
+            </div>
+
+            <div class="guide-card">
+              <div class="guide-heading">尺寸处理</div>
+              <div class="guide-help">
+                低精度复用主程序尺寸策略且最长边 512px；标准结构相似性不使用 200px 缩略图或 512px 限制，仅将较大原图缩小到较小原图的完整分辨率。
+              </div>
+            </div>
+          </div>
+        </el-popover>
+      </div>
     </header>
 
-    <section class="metric-guide" aria-label="指标说明">
-      <div class="guide-item">
-        <strong>pHash 距离</strong>
-        <span>范围 0–64，越小表示视觉特征越接近；0 不代表文件或像素完全一致。</span>
-      </div>
-      <div class="guide-item">
-        <strong>低精度相似度</strong>
-        <span>范围 0–1，越接近 1 越相似；复现主程序当前的灰度像素差算法，不是标准 SSIM。</span>
-      </div>
-      <div class="guide-item">
-        <strong>标准 SSIM</strong>
-        <span>越接近 1 通常越相似，标准公式可能出现负值；仅在点击单张卡片后计算。</span>
-      </div>
-      <div class="guide-item">
-        <strong>尺寸处理</strong>
-        <span>低精度复用主程序尺寸策略且最长边 512px；标准 SSIM 不使用 200px 缩略图或 512px 限制，仅将较大原图缩小到较小原图的完整分辨率。</span>
-      </div>
-    </section>
-
-    <section class="toolbar" aria-label="图片操作">
-      <div class="toolbar-actions">
-        <el-button type="primary" :icon="FolderOpened" @click="chooseImages">
-          选择图片
-        </el-button>
-        <el-button :icon="Delete" :disabled="!session.hasContent.value" @click="clearAll">
-          清空全部
-        </el-button>
-      </div>
-      <div class="toolbar-summary">
-        <span>已加载 {{ session.items.value.length }} 张</span>
-        <span v-if="session.loadingCount.value > 0">
-          · 正在加载 {{ session.loadingCount.value }} 张
-        </span>
-        <span class="drop-hint">支持多选，也可以将图片拖入窗口</span>
-      </div>
-    </section>
-
-    <section
-      class="gallery-shell"
-      :class="{ 'is-dragging': isDragging }"
-      aria-live="polite"
-    >
-      <div v-if="isDragging" class="drop-overlay">
-        <el-icon><UploadFilled /></el-icon>
-        <span>松开即可添加图片</span>
+    <section class="panel upload-panel" aria-labelledby="metrics-upload-title">
+      <div class="panel-heading">
+        <div>
+          <h2 id="metrics-upload-title">测试图片</h2>
+          <p>
+            可一次添加多张；已加载 {{ session.items.value.length }} 张
+            <template v-if="session.loadingCount.value > 0">
+              · 正在加载 {{ session.loadingCount.value }} 张
+            </template>
+          </p>
+        </div>
+        <div class="panel-actions">
+          <el-button type="primary" plain :icon="FolderOpened" @click="chooseImages">
+            添加图片
+          </el-button>
+          <el-button :icon="Delete" :disabled="!session.hasContent.value" @click="clearAll">
+            清空全部
+          </el-button>
+        </div>
       </div>
 
-      <div
-        v-if="session.items.value.length === 0 && session.loadingCount.value === 0"
-        class="empty-state"
+      <section
+        class="gallery-shell"
+        :class="{ 'is-dragging': isDragging }"
+        aria-live="polite"
       >
-        <el-icon><Picture /></el-icon>
-        <h2>添加图片开始测试</h2>
-        <p>选择多张图片，或直接拖入此窗口。</p>
-        <el-button type="primary" :icon="FolderOpened" @click="chooseImages">
-          选择图片
-        </el-button>
-      </div>
-
-      <template v-else>
-        <div
-          v-if="session.items.value.length > 0 && !session.baselinePath.value"
-          class="baseline-hint"
-        >
-          点击一张图片卡片，将它设为底图
+        <div v-if="isDragging" class="drop-overlay">
+          <el-icon><UploadFilled /></el-icon>
+          <span>松开即可添加图片</span>
         </div>
 
-        <div class="metrics-grid">
-          <article
-            v-for="(item, index) in session.items.value"
-            :key="item.path"
-            class="metrics-card"
-            :class="{ 'is-baseline': item.path === session.baselinePath.value }"
-            :data-test="`card-${index}`"
-            role="button"
-            tabindex="0"
-            :aria-pressed="item.path === session.baselinePath.value"
-            :aria-label="`将 ${item.fileName} 设为底图`"
-            @click="selectBaseline(item.path)"
-            @keydown.enter.prevent="selectBaseline(item.path)"
-            @keydown.space.prevent="selectBaseline(item.path)"
-          >
+        <button
+          v-if="session.items.value.length === 0 && session.loadingCount.value === 0"
+          type="button"
+          class="drop-empty"
+          @click="chooseImages"
+        >
+          <el-icon><PictureRounded /></el-icon>
+          <span>点击选择，或把图片拖进窗口</span>
+          <small>支持 JPG、PNG、WebP、BMP、GIF、TIFF</small>
+        </button>
+
+        <template v-else>
+          <div class="metrics-grid">
+            <article
+              v-for="(item, index) in session.items.value"
+              :key="item.path"
+              class="metrics-card"
+              :class="{ 'is-baseline': item.path === session.baselinePath.value }"
+              :data-test="`card-${index}`"
+              role="button"
+              tabindex="0"
+              :aria-pressed="item.path === session.baselinePath.value"
+              :aria-label="`将 ${item.fileName} 设为标准图`"
+              :aria-disabled="item.loadState === 'loading'"
+              @click="selectBaseline(item.path)"
+              @keydown.enter.prevent="selectBaseline(item.path)"
+              @keydown.space.prevent="selectBaseline(item.path)"
+            >
             <div class="image-wrap" @click.stop>
+              <el-skeleton v-if="item.loadState === 'loading'" animated class="inline-loading">
+                <template #template>
+                  <el-skeleton-item variant="image" class="inline-loading-image" />
+                </template>
+              </el-skeleton>
               <el-image
+                v-else
                 class="metrics-image"
                 :src="item.thumbnailDataUrl"
                 :preview-src-list="previewUrls"
-                :initial-index="index"
+                :initial-index="previewIndex(item)"
                 :alt="item.fileName"
                 fit="contain"
                 preview-teleported
@@ -123,27 +143,31 @@
             </div>
 
             <div class="card-body">
-              <el-tooltip :content="item.fileName" placement="top-start">
+              <el-tooltip :content="item.fileName" placement="right-start">
                 <h2 class="file-name">{{ item.fileName }}</h2>
               </el-tooltip>
               <p class="file-meta">
-                {{ formatFileSize(item.fileSize) }}
+                {{ item.loadState === 'loading' ? '加载中…' : formatFileSize(item.fileSize) }}
               </p>
 
-              <div v-if="item.path === session.baselinePath.value" class="baseline-label">
-                底图
+              <div v-if="item.loadState === 'loading'" class="baseline-label is-loading">
+                正在读取图片
+              </div>
+
+              <div v-else-if="item.path === session.baselinePath.value" class="baseline-label">
+                标准图
               </div>
 
               <div v-else class="metrics-list">
                 <div class="metrics-inline">
-                  <el-tooltip :content="phashTooltip(item.phash)" placement="top-start">
+                  <el-tooltip :content="phashTooltip(item.phash)" placement="right-start">
                     <span class="metric-chip">
-                      <span>pHash 距离：</span>
+                      <span>感知哈希距离：</span>
                       <span class="metric-value">{{ phashValue(item) }}</span>
                     </span>
                   </el-tooltip>
                   <span class="metric-chip">
-                    <span>低精度 SSIM：</span>
+                    <span>低精度结构相似性：</span>
                     <el-button
                       v-if="item.low.status === 'error'"
                       text
@@ -159,7 +183,7 @@
                     </span>
                   </span>
                   <span class="metric-chip">
-                    <span>标准 SSIM：</span>
+                    <span>标准结构相似性：</span>
                     <template v-if="item.high.status === 'done'">
                       <span class="metric-value">
                         {{ formatScore(item.high.value.score) }} · {{ formatDuration(item.high.value.durationMs) }}
@@ -185,30 +209,14 @@
                   低精度失败：{{ item.low.error }}
                 </p>
                 <p v-if="item.high.status === 'error'" class="metric-error">
-                  标准 SSIM 失败：{{ item.high.error }}
+                  标准结构相似性失败：{{ item.high.error }}
                 </p>
               </div>
             </div>
-          </article>
-          <article
-            v-for="index in session.loadingCount.value"
-            :key="`loading-${index}`"
-            class="metrics-card loading-card"
-            data-test="loading-card"
-            aria-label="图片加载中"
-          >
-            <el-skeleton animated>
-              <template #template>
-                <el-skeleton-item variant="image" class="loading-image" />
-                <div class="loading-body">
-                  <el-skeleton-item variant="h3" style="width: 62%" />
-                  <el-skeleton-item variant="text" style="width: 38%" />
-                </div>
-              </template>
-            </el-skeleton>
-          </article>
-        </div>
-      </template>
+            </article>
+          </div>
+        </template>
+      </section>
     </section>
   </main>
 </template>
@@ -219,8 +227,9 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, Delete, FolderOpened, Picture, UploadFilled } from '@element-plus/icons-vue'
+import { Close, Delete, FolderOpened, InfoFilled, PictureRounded, UploadFilled } from '@element-plus/icons-vue'
 import {
+  computeTestPhash,
   computeTestLowPrecision,
   computeTestStandardSsim,
   loadTestImage
@@ -230,16 +239,21 @@ import { createImageMetricsSession, type TestImageItem } from '@/features/imageM
 const appWindow = getCurrentWindow()
 const session = createImageMetricsSession({
   loadImage: loadTestImage,
+  computePhash: computeTestPhash,
   computeLow: computeTestLowPrecision,
   computeHigh: computeTestStandardSsim
 })
 const isDragging = ref(false)
-const previewUrls = computed(() => session.items.value.map((item) => convertFileSrc(item.path)))
+const guidePopoverVisible = ref(false)
+const previewUrls = computed(() =>
+  session.items.value
+    .filter((item) => item.loadState === 'ready')
+    .map((item) => convertFileSrc(item.path))
+)
 const baselineItem = computed(() =>
   session.items.value.find((item) => item.path === session.baselinePath.value)
 )
 
-let allowNativeClose = false
 let unlistenClose: (() => void) | undefined
 let unlistenDrop: (() => void) | undefined
 
@@ -276,12 +290,20 @@ async function importPaths(paths: string[]) {
 }
 
 function selectBaseline(path: string) {
+  const item = session.items.value.find((item) => item.path === path)
+  if (item?.loadState !== 'ready') return
   void session.setBaseline(path)
+}
+
+function previewIndex(item: TestImageItem) {
+  return session.items.value
+    .filter((candidate) => candidate.loadState === 'ready')
+    .findIndex((candidate) => candidate.path === item.path)
 }
 
 async function requestHighPrecision(path: string) {
   const started = await session.computeHighPrecision(path)
-  if (!started) ElMessage.info('请等待当前高精度计算完成')
+  if (!started) ElMessage.info('请等待当前标准结构相似性计算完成')
 }
 
 async function requestLowPrecision(path: string) {
@@ -315,24 +337,15 @@ async function confirmDiscard() {
   }
 }
 
-async function requestClose() {
-  if (!await confirmDiscard()) return
-  allowNativeClose = true
-  try {
-    await appWindow.close()
-  } catch (error) {
-    allowNativeClose = false
-    ElMessage.error(`关闭窗口失败：${message(error)}`)
-  }
-}
-
 function phashTooltip(candidatePhash: string) {
-  const baselinePhash = baselineItem.value?.phash || '未选择底图'
-  return `底图 pHash：${baselinePhash}\n当前图片 pHash：${candidatePhash}`
+  const baselinePhash = baselineItem.value?.phash || '未选择标准图'
+  return `标准图感知哈希：${baselinePhash}\n当前图片感知哈希：${candidatePhash}`
 }
 
 function phashValue(item: TestImageItem) {
   if (!session.baselinePath.value) return '等待中'
+  if (item.phashState === 'loading') return '计算中…'
+  if (item.phashState === 'error') return '失败'
   return item.phashDistance === null ? '失败' : String(item.phashDistance)
 }
 
@@ -364,9 +377,14 @@ function message(error: unknown) {
 
 onMounted(async () => {
   unlistenClose = await appWindow.onCloseRequested((event) => {
-    if (allowNativeClose) return
+    if (!session.hasContent.value) return
     event.preventDefault()
-    void requestClose()
+    void confirmDiscard().then((confirmed) => {
+      if (!confirmed) return
+      void appWindow.close().catch((error) => {
+        ElMessage.error(`关闭窗口失败：${message(error)}`)
+      })
+    })
   })
   unlistenDrop = await appWindow.onDragDropEvent(async (event) => {
     if (event.payload.type === 'over') {
@@ -402,79 +420,115 @@ defineExpose({ addImagePathsForTest: importPaths })
   overflow: hidden;
 }
 
-.window-header,
-.toolbar {
-  flex: 0 0 auto;
+.window-header {
+  padding: 20px 24px;
+  border: 1px solid #dcdfe6;
+  border-radius: 10px;
+  background: #ffffff;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 24px;
 }
 
-.window-header {
-  h1 {
-    margin: 0;
-    font-size: 22px;
-  }
+.eyebrow {
+  margin: 0 0 4px !important;
+  color: #409eff !important;
+  font-size: 11px !important;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
 
-  p {
-    margin: 4px 0 0;
-    color: #606266;
-    font-size: 13px;
-  }
+.window-header h1 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.3;
+}
+
+.window-header p {
+  margin: 6px 0 0;
+  color: #606266;
+  font-size: 14px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .metric-guide {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid #d9ecff;
-  border-radius: 8px;
-  background: #ecf5ff;
+  padding: 0;
 }
 
-.guide-item {
+.guide-content {
+  padding: 0;
+  background: #ffffff;
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  font-size: 12px;
-  line-height: 1.5;
-
-  strong {
-    flex: 0 0 auto;
-    color: #337ecc;
-  }
-
-  span {
-    color: #4c5967;
-  }
+  flex-direction: column;
+  gap: 10px;
 }
 
-.toolbar {
-  padding: 10px 12px;
-  border: 1px solid #dcdfe6;
+.guide-card {
+  padding: 8px;
   border-radius: 8px;
-  background: #fff;
+  background: #f8fafc;
+  border: 1px solid #edf1f7;
 }
 
-.toolbar-actions,
-.toolbar-summary {
+.guide-heading {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.guide-help {
+  color: #909399;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.panel {
+  border: 1px solid #dcdfe6;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.upload-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-heading {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.panel-heading p {
+  margin: 5px 0 0;
+  color: #606266;
+  font-size: 12px;
+}
+
+.panel-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.toolbar-summary {
-  color: #606266;
-  font-size: 13px;
-}
-
-.drop-hint {
-  margin-left: 8px;
-  color: #909399;
+  flex: 0 0 auto;
 }
 
 .gallery-shell {
@@ -482,12 +536,12 @@ defineExpose({ addImagePathsForTest: importPaths })
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  border: 1px solid #dcdfe6;
   border-radius: 8px;
-  background: #fff;
+  background: transparent;
 
   &.is-dragging {
-    border-color: #409eff;
+    outline: 2px dashed #409eff;
+    outline-offset: -2px;
   }
 }
 
@@ -512,49 +566,39 @@ defineExpose({ addImagePathsForTest: importPaths })
   }
 }
 
-.empty-state {
-  min-height: 360px;
-  height: 100%;
+.drop-empty {
+  width: 100%;
+  min-height: 112px;
+  border: 1px dashed #c0c4cc;
+  border-radius: 8px;
+  background: #fafcff;
+  color: #606266;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  color: #606266;
-
-  > .el-icon {
-    font-size: 54px;
-    color: #a8abb2;
-  }
-
-  h2,
-  p {
-    margin: 0;
-  }
-
-  h2 {
-    font-size: 18px;
-  }
-
-  p {
-    color: #909399;
-    font-size: 13px;
-  }
+  gap: 5px;
+  cursor: pointer;
+  height:100%;
 }
 
-.baseline-hint {
-  margin: 12px 12px 0;
-  padding: 9px 12px;
-  border-radius: 6px;
-  background: #fdf6ec;
-  color: #b88230;
-  font-size: 13px;
+.drop-empty:hover {
+  border-color: #409eff;
+  color: #409eff;
+}
+
+.drop-empty .el-icon {
+  font-size: 28px;
+}
+
+.drop-empty small {
+  color: #909399;
 }
 
 .metrics-grid {
   padding: 12px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   gap: 12px;
   align-content: start;
 }
@@ -582,6 +626,10 @@ defineExpose({ addImagePathsForTest: importPaths })
     border: 2px solid #409eff;
     background: #ecf5ff;
   }
+
+  &[aria-disabled='true'] {
+    cursor: wait;
+  }
 }
 
 .image-wrap {
@@ -589,41 +637,35 @@ defineExpose({ addImagePathsForTest: importPaths })
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 120px;
-  max-height: 200px;
+  min-height: 86px;
+  max-height: 140px;
   background: #f5f7fa;
   overflow: hidden;
 }
 
 .metrics-image {
   width: 100%;
-  max-height: 200px;
+  max-height: 140px;
   display: block;
 
   :deep(.el-image__inner) {
-    max-height: 200px;
+    max-height: 140px;
   }
+}
+
+.inline-loading {
+  width: 100%;
+}
+
+.inline-loading-image {
+  width: 100%;
+  height: 140px;
 }
 
 .image-error {
   padding: 32px;
   color: #909399;
   font-size: 13px;
-}
-
-.loading-card {
-  cursor: default;
-}
-
-.loading-image {
-  width: 100%;
-  height: 160px;
-}
-
-.loading-body {
-  padding: 12px;
-  display: grid;
-  gap: 10px;
 }
 
 .remove-button {
@@ -663,6 +705,11 @@ defineExpose({ addImagePathsForTest: importPaths })
   font-size: 14px;
   font-weight: 650;
   text-align: center;
+}
+
+.baseline-label.is-loading {
+  background: #f4f4f5;
+  color: #909399;
 }
 
 .metrics-list {
@@ -716,16 +763,12 @@ defineExpose({ addImagePathsForTest: importPaths })
 }
 
 @media (max-width: 900px) {
-  .metric-guide {
-    grid-template-columns: 1fr;
-  }
-
-  .toolbar {
+  .panel-heading {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .toolbar-summary {
+  .panel-actions {
     flex-wrap: wrap;
   }
 }

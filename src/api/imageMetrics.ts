@@ -7,8 +7,11 @@ export interface TestImageInfo {
   width: number
   height: number
   modifiedAtMs: number
-  phash: string
   thumbnailDataUrl: string
+}
+
+export interface TestImagePhashResult {
+  phash: string
 }
 
 export interface TestLowPrecisionResult {
@@ -23,6 +26,14 @@ export interface TestStandardSsimResult {
 
 export function loadTestImage(path: string): Promise<TestImageInfo> {
   return invoke<TestImageInfo>('load_test_image', { path })
+}
+
+export function computeTestPhash(image: TestImageInfo): Promise<TestImagePhashResult> {
+  return invoke<TestImagePhashResult>('compute_test_phash', {
+    path: image.path,
+    fileSize: image.fileSize,
+    modifiedAtMs: image.modifiedAtMs
+  })
 }
 
 export function computeTestLowPrecision(

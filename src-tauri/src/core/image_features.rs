@@ -71,9 +71,7 @@ pub fn compute_blake3(path: &Path) -> Result<String> {
 }
 
 pub fn phash_distance(left: &str, right: &str) -> Option<u32> {
-    let left = u64::from_str_radix(left, 16).ok()?;
-    let right = u64::from_str_radix(right, 16).ok()?;
-    Some((left ^ right).count_ones())
+    PHashComputer::hamming_distance(left, right).ok()
 }
 
 #[cfg(test)]

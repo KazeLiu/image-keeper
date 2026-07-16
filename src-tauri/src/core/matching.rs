@@ -1,6 +1,7 @@
+use crate::core::phash::{PHashComputer, PHASH_ALGORITHM_VERSION};
 use crate::db::models::Image;
 
-/// pHash 匹配引擎 - Phase 3 候选筛选
+/// 感知哈希匹配引擎 - Phase 3 候选筛选
 pub struct PhashMatcher {
     max_distance: i32,
     top_k: usize,
@@ -14,16 +15,11 @@ impl PhashMatcher {
         }
     }
 
-    /// 计算两个 pHash 的汉明距离
+    /// 计算两个感知哈希的汉明距离
     pub fn hamming_distance(hash1: &str, hash2: &str) -> Option<i32> {
-        if hash1.len() != 16 || hash2.len() != 16 {
-            return None;
-        }
-
-        let h1 = u64::from_str_radix(hash1, 16).ok()?;
-        let h2 = u64::from_str_radix(hash2, 16).ok()?;
-
-        Some((h1 ^ h2).count_ones() as i32)
+        PHashComputer::hamming_distance(hash1, hash2)
+            .ok()
+            .and_then(|distance| i32::try_from(distance).ok())
     }
 
     /// 查找候选匹配（返回候选列表和是否被截断）
@@ -125,7 +121,7 @@ mod tests {
             frame_strategy: "first".to_string(),
             blake3_hash: Some("hash1".to_string()),
             phash: Some("0000000000000001".to_string()), // 距离 1
-            phash_algorithm_version: Some("v1".to_string()),
+            phash_algorithm_version: Some(PHASH_ALGORITHM_VERSION.to_string()),
             scan_status: ScanStatus::Completed,
             error_message: None,
             scanned_at: 0,

@@ -71,7 +71,7 @@ impl ResultClassifier {
             };
         }
 
-        // 4. 相似度匹配（pHash + SSIM）
+        // 4. 相似度匹配（感知哈希 + 结构相似性）
         let similar_matches: Vec<_> = candidates
             .iter()
             .filter(|c| c.match_type == MatchType::Similar && c.ssim_score.is_some())
@@ -79,7 +79,7 @@ impl ResultClassifier {
             .collect();
 
         if similar_matches.is_empty() {
-            // 所有候选未完成 SSIM 计算或失败
+            // 所有候选未完成结构相似性计算或失败
             return ClassificationResult {
                 analysis_type: AnalysisType::NotEvaluated,
                 primary_match: None,
@@ -100,14 +100,14 @@ impl ResultClassifier {
                 analysis_type: AnalysisType::NoBaselineMatch,
                 primary_match: None,
                 all_candidates: candidates,
-                reason: format!("所有候选 SSIM < {}", self.variant_review_lower_bound),
+                reason: format!("所有候选结构相似性 < {}", self.variant_review_lower_bound),
             };
         }
 
-        // 6. 按可比性、SSIM、pHash 距离和基准图片分辨率稳定排序
+        // 6. 按可比性、结构相似性、感知哈希距离和基准图片分辨率稳定排序
         let mut sorted_candidates = similar_matches.clone();
         sorted_candidates.sort_by(|a, b| {
-            // 优先：SSIM 降序
+            // 优先：结构相似性降序
             let ssim_cmp = b
                 .ssim_score
                 .unwrap_or(0.0)
@@ -117,7 +117,7 @@ impl ResultClassifier {
                 return ssim_cmp;
             }
 
-            // 次优：pHash 距离升序
+            // 次优：感知哈希距离升序
             let phash_cmp = a.phash_distance.cmp(&b.phash_distance);
             if phash_cmp != std::cmp::Ordering::Equal {
                 return phash_cmp;
@@ -143,7 +143,7 @@ impl ResultClassifier {
                     primary_match: Some(primary.clone()),
                     all_candidates: similar_matches,
                     reason: format!(
-                        "多个候选 SSIM 接近（差值 {} <= {}）",
+                        "多个候选结构相似性接近（差值 {} <= {}）",
                         ssim_diff, self.primary_match_tie_threshold
                     ),
                 };
@@ -158,7 +158,7 @@ impl ResultClassifier {
                     analysis_type: AnalysisType::LikelyCompressed,
                     primary_match: Some(primary.clone()),
                     all_candidates: similar_matches,
-                    reason: format!("满足有方向性压缩条件（SSIM = {:.4}）", ssim),
+                    reason: format!("满足有方向性压缩条件（结构相似性 = {:.4}）", ssim),
                 };
             }
         }
@@ -178,7 +178,7 @@ impl ResultClassifier {
                         analysis_type: AnalysisType::Variant,
                         primary_match: Some(primary.clone()),
                         all_candidates: similar_matches,
-                        reason: format!("同尺寸但存在内容差异（SSIM = {:.4}）", ssim),
+                        reason: format!("同尺寸但存在内容差异（结构相似性 = {:.4}）", ssim),
                     };
                 }
             }
@@ -189,7 +189,7 @@ impl ResultClassifier {
             analysis_type: AnalysisType::SimilarKeep,
             primary_match: Some(primary.clone()),
             all_candidates: similar_matches,
-            reason: format!("相似但不满足压缩或变体条件（SSIM = {:.4}）", ssim),
+            reason: format!("相似但不满足压缩或变体条件（结构相似性 = {:.4}）", ssim),
         }
     }
 

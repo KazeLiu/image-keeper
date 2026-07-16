@@ -1,4 +1,5 @@
 use crate::core::image_features::extract_image_features;
+use crate::core::phash::PHASH_ALGORITHM_VERSION;
 use crate::db::models::FolderRole;
 use crate::db::repository::Repository;
 use crate::error::{AppError, Result};
@@ -153,7 +154,7 @@ impl ScanEngine {
                 image_id,
                 &features.blake3_hash,
                 &features.phash,
-                "phash-v1",
+                PHASH_ALGORITHM_VERSION,
             )?;
 
             image_id

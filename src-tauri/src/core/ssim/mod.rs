@@ -6,27 +6,27 @@ use crate::db::repository::Repository;
 use crate::error::Result;
 use std::path::Path;
 
-/// SSIM 引擎
+/// 结构相似性引擎
 pub struct SsimEngine;
 
 impl SsimEngine {
-    /// 计算两张图片的 SSIM
+    /// 计算两张图片的结构相似性
     pub fn compute_ssim(path1: &Path, path2: &Path) -> Result<f64> {
         compute::SsimComputer::compute_from_files(path1, path2)
     }
 
-    /// 为候选配对计算 SSIM
+    /// 为候选配对计算结构相似性
     pub fn compute_ssim_for_pairs(
         scan_id: i64,
         repository: &Repository,
         ssim_threshold: f64,
     ) -> Result<()> {
-        // 获取所有待计算 SSIM 的配对
+        // 获取所有待计算结构相似性的配对
         let pairs = Self::get_pending_pairs(scan_id, repository)?;
 
-        // 顺序计算 SSIM（rusqlite Connection 不支持跨线程共享）
+        // 顺序计算结构相似性（rusqlite Connection 不支持跨线程共享）
         for (pair_id, larger_path, smaller_path) in &pairs {
-            // 计算 SSIM
+            // 计算结构相似性
             let ssim_score = compute::SsimComputer::compute_from_files(
                 Path::new(larger_path),
                 Path::new(smaller_path),
@@ -48,7 +48,7 @@ impl SsimEngine {
         Ok(())
     }
 
-    /// 获取待计算 SSIM 的配对
+    /// 获取待计算结构相似性的配对
     fn get_pending_pairs(
         scan_id: i64,
         repository: &Repository,

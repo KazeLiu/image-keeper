@@ -58,11 +58,11 @@
 #### `ComparisonResults.vue` - 结果展示
 - 按 AnalysisType 分组过滤
 - 卡片式列表展示
-- 显示 pHash 距离、SSIM、分辨率比
+- 显示感知哈希距离、结构相似性、分辨率比
 - **人工复核对话框**
   - 并排对比：对比图片 vs 基准匹配
   - 显示 BLAKE3、分辨率、文件大小
-  - 显示对比指标（pHash、SSIM、比例）
+  - 显示对比指标（感知哈希、结构相似性、比例）
   - 批准/拒绝操作
   - 禁止批准 inconclusive/error/not_evaluated
 
@@ -95,7 +95,7 @@
 
 ### 4. 人工复核
 - ✓ 并排查看对比图片和基准匹配
-- ✓ 显示 BLAKE3, pHash, SSIM, 分辨率
+- ✓ 显示 BLAKE3, 感知哈希, 结构相似性, 分辨率
 - ✓ 批准/拒绝操作
 - ✓ 禁止批准 inconclusive/error/not_evaluated
 
