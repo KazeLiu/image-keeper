@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { computeTestLowPrecision, computeTestPhash, type TestImageInfo } from './imageMetrics'
+import {
+  computeTestDifferencePreview,
+  computeTestLowPrecision,
+  computeTestPhash,
+  type TestImageInfo
+} from './imageMetrics'
 
 const invoke = vi.hoisted(() => vi.fn())
 
@@ -43,6 +48,24 @@ describe('image metrics api', () => {
       path: 'base',
       fileSize: 100,
       modifiedAtMs: 1
+    })
+  })
+
+  it('差异高亮任务携带两张图片指纹和灵敏度', async () => {
+    invoke.mockResolvedValue({ regionCount: 0, changedPixelRatio: 0 })
+    const baseline = { ...image('base.png'), fileSize: 10, modifiedAtMs: 11 }
+    const candidate = { ...image('candidate.png'), fileSize: 20, modifiedAtMs: 21 }
+
+    await computeTestDifferencePreview(baseline, candidate, 50)
+
+    expect(invoke).toHaveBeenCalledWith('compute_test_difference_preview', {
+      baselinePath: 'base.png',
+      candidatePath: 'candidate.png',
+      baselineFileSize: 10,
+      baselineModifiedAtMs: 11,
+      candidateFileSize: 20,
+      candidateModifiedAtMs: 21,
+      sensitivity: 50
     })
   })
 })

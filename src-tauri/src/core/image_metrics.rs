@@ -123,7 +123,7 @@ pub fn compute_low_precision_sync(
     })
 }
 
-fn normalized_pair(
+pub(crate) fn normalized_pair(
     left_path: &Path,
     right_path: &Path,
     max_edge: Option<u32>,
@@ -178,7 +178,7 @@ pub fn compute_standard_ssim_sync(
     })
 }
 
-fn validate_file_fingerprint(
+pub(crate) fn validate_file_fingerprint(
     path: &Path,
     expected_size: u64,
     expected_modified_at_ms: u64,

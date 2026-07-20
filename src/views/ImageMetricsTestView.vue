@@ -211,6 +211,18 @@
                 <p v-if="item.high.status === 'error'" class="metric-error">
                   标准结构相似性失败：{{ item.high.error }}
                 </p>
+                <div v-if="session.baselinePath.value" class="card-actions">
+                  <el-button
+                    text
+                    type="primary"
+                    size="small"
+                    :icon="View"
+                    :data-test="`difference-${index}`"
+                    @click.stop="openDifferencePreview(item)"
+                  >
+                    差异高亮
+                  </el-button>
+                </div>
               </div>
             </div>
             </article>
@@ -218,6 +230,19 @@
         </template>
       </section>
     </section>
+    <DifferenceHighlightDialog
+      :visible="differencePreview.visible.value"
+      :loading="differencePreview.loading.value"
+      :error="differencePreview.error.value"
+      :result="differencePreview.result.value"
+      :baseline-name="differencePreview.baseline.value?.fileName || ''"
+      :candidate-name="differencePreview.candidate.value?.fileName || ''"
+      :sensitivity="differencePreview.sensitivity.value"
+      @update:sensitivity="differencePreview.sensitivity.value = $event"
+      @refresh="differencePreview.refresh"
+      @retry="differencePreview.retry"
+      @close="differencePreview.close"
+    />
   </main>
 </template>
 
@@ -227,14 +252,17 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, Delete, FolderOpened, InfoFilled, PictureRounded, UploadFilled } from '@element-plus/icons-vue'
+import { Close, Delete, FolderOpened, InfoFilled, PictureRounded, UploadFilled, View } from '@element-plus/icons-vue'
 import {
+  computeTestDifferencePreview,
   computeTestPhash,
   computeTestLowPrecision,
   computeTestStandardSsim,
   loadTestImage
 } from '@/api/imageMetrics'
 import { createImageMetricsSession, type TestImageItem } from '@/features/imageMetrics/session'
+import { createDifferencePreview } from '@/features/imageMetrics/differencePreview'
+import DifferenceHighlightDialog from '@/components/image-metrics/DifferenceHighlightDialog.vue'
 
 const appWindow = getCurrentWindow()
 const session = createImageMetricsSession({
@@ -243,6 +271,7 @@ const session = createImageMetricsSession({
   computeLow: computeTestLowPrecision,
   computeHigh: computeTestStandardSsim
 })
+const differencePreview = createDifferencePreview(computeTestDifferencePreview)
 const isDragging = ref(false)
 const guidePopoverVisible = ref(false)
 const previewUrls = computed(() =>
@@ -295,6 +324,11 @@ function selectBaseline(path: string) {
   void session.setBaseline(path)
 }
 
+function openDifferencePreview(candidate: TestImageItem) {
+  if (!baselineItem.value || candidate.loadState !== 'ready') return
+  void differencePreview.open(baselineItem.value, candidate)
+}
+
 function previewIndex(item: TestImageItem) {
   return session.items.value
     .filter((candidate) => candidate.loadState === 'ready')
@@ -311,6 +345,7 @@ async function requestLowPrecision(path: string) {
 }
 
 function clearAll() {
+  differencePreview.close()
   session.reset()
   ElMessage.success('已清空本次测试')
 }
@@ -401,6 +436,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unlistenClose?.()
   unlistenDrop?.()
+  differencePreview.close()
   session.reset()
 })
 
@@ -754,6 +790,17 @@ defineExpose({ addImagePathsForTest: importPaths })
 .is-error,
 .metric-error {
   color: #f56c6c;
+}
+
+.card-actions {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #ebeef5;
+
+  :deep(.el-button) {
+    min-height: 32px;
+    margin-left: -8px;
+  }
 }
 
 .metric-error {

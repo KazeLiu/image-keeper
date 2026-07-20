@@ -43,6 +43,7 @@ fn main() {
             commands::image_metrics::compute_test_phash,
             commands::image_metrics::compute_test_low_precision,
             commands::image_metrics::compute_test_standard_ssim,
+            commands::image_metrics::compute_test_difference_preview,
             commands::comparison::start_multi_compare,
             commands::comparison::get_comparison_stats,
             commands::comparison::get_comparison_results,

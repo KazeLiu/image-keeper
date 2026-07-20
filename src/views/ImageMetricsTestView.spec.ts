@@ -7,7 +7,8 @@ const apiMocks = vi.hoisted(() => ({
   load: vi.fn(),
   computePhash: vi.fn(),
   computeLow: vi.fn(),
-  computeHigh: vi.fn(async () => ({ score: 0.95, durationMs: 10 }))
+  computeHigh: vi.fn(async () => ({ score: 0.95, durationMs: 10 })),
+  computeDifference: vi.fn()
 }))
 
 const windowMocks = vi.hoisted(() => ({
@@ -21,7 +22,8 @@ vi.mock('@/api/imageMetrics', () => ({
   loadTestImage: apiMocks.load,
   computeTestPhash: apiMocks.computePhash,
   computeTestLowPrecision: apiMocks.computeLow,
-  computeTestStandardSsim: apiMocks.computeHigh
+  computeTestStandardSsim: apiMocks.computeHigh,
+  computeTestDifferencePreview: apiMocks.computeDifference
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -78,6 +80,15 @@ describe('ImageMetricsTestView', () => {
       durationMs: 2
     })
     apiMocks.computeHigh.mockResolvedValue({ score: 0.95, durationMs: 10 })
+    apiMocks.computeDifference.mockResolvedValue({
+      baselineDataUrl: 'data:image/png;base64,baseline',
+      candidateDataUrl: 'data:image/png;base64,candidate',
+      highlightDataUrl: 'data:image/png;base64,highlight',
+      width: 100,
+      height: 100,
+      changedPixelRatio: 0.12,
+      regionCount: 2
+    })
   })
 
   it('closes an empty window without confirmation', async () => {
@@ -162,6 +173,39 @@ describe('ImageMetricsTestView', () => {
 
     expect(apiMocks.computeHigh).toHaveBeenCalledTimes(1)
     expect(wrapper.text()).toContain('0.950000 · 10 ms')
+  })
+
+  it('opens a difference highlight preview from a candidate card', async () => {
+    const wrapper = mountView()
+    await addPaths(wrapper, ['base', 'candidate'])
+    await wrapper.get('[data-test="card-0"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="difference-0"]').exists()).toBe(false)
+    await wrapper.get('[data-test="difference-1"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.computeDifference).toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'base' }),
+      expect.objectContaining({ path: 'candidate' }),
+      50
+    )
+    expect(document.body.textContent).toContain('差异高亮')
+    expect(document.body.textContent).toContain('检测到 2 个差异区域')
+  })
+
+  it('keeps difference preview errors in the dialog and offers retry', async () => {
+    apiMocks.computeDifference.mockRejectedValueOnce(new Error('生成失败'))
+    const wrapper = mountView()
+    await addPaths(wrapper, ['base', 'candidate'])
+    await wrapper.get('[data-test="card-0"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="difference-1"]').trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('生成失败')
+    expect(document.body.querySelector('[data-test="difference-retry"]')).not.toBeNull()
   })
 
   it('renders candidate metrics in one compact line', async () => {

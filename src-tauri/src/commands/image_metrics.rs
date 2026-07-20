@@ -1,3 +1,4 @@
+use crate::core::image_difference;
 use crate::core::image_metrics as shared;
 use crate::error::{AppError, Result};
 
@@ -5,6 +6,7 @@ pub type TestImageInfo = shared::LoadedTestImage;
 pub type TestImagePhashResult = shared::TestImagePhashResult;
 pub type TestLowPrecisionResult = shared::TestLowPrecisionResult;
 pub type TestStandardSsimResult = shared::TestStandardSsimResult;
+pub type TestDifferencePreviewResult = image_difference::DifferencePreview;
 
 fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
     shared::thumbnail_dimensions(width, height)
@@ -49,6 +51,48 @@ fn compute_standard_ssim_sync(
         candidate_file_size,
         candidate_modified_at_ms,
     )
+}
+
+fn compute_difference_preview_sync(
+    baseline_path: String,
+    candidate_path: String,
+    baseline_file_size: u64,
+    baseline_modified_at_ms: u64,
+    candidate_file_size: u64,
+    candidate_modified_at_ms: u64,
+    sensitivity: u8,
+) -> Result<TestDifferencePreviewResult> {
+    if sensitivity > 100 {
+        return Err(AppError::ValidationError(
+            "差异灵敏度必须在 0 到 100 之间".to_string(),
+        ));
+    }
+    shared::validate_file_fingerprint(
+        std::path::Path::new(&baseline_path),
+        baseline_file_size,
+        baseline_modified_at_ms,
+    )?;
+    shared::validate_file_fingerprint(
+        std::path::Path::new(&candidate_path),
+        candidate_file_size,
+        candidate_modified_at_ms,
+    )?;
+    let preview = image_difference::compute_difference_preview(
+        std::path::Path::new(&baseline_path),
+        std::path::Path::new(&candidate_path),
+        sensitivity,
+    )?;
+    shared::validate_file_fingerprint(
+        std::path::Path::new(&baseline_path),
+        baseline_file_size,
+        baseline_modified_at_ms,
+    )?;
+    shared::validate_file_fingerprint(
+        std::path::Path::new(&candidate_path),
+        candidate_file_size,
+        candidate_modified_at_ms,
+    )?;
+    Ok(preview)
 }
 
 fn join_error(error: impl std::fmt::Display) -> AppError {
@@ -104,6 +148,31 @@ pub async fn compute_test_standard_ssim(
             baseline_modified_at_ms,
             candidate_file_size,
             candidate_modified_at_ms,
+        )
+    })
+    .await
+    .map_err(join_error)?
+}
+
+#[tauri::command]
+pub async fn compute_test_difference_preview(
+    baseline_path: String,
+    candidate_path: String,
+    baseline_file_size: u64,
+    baseline_modified_at_ms: u64,
+    candidate_file_size: u64,
+    candidate_modified_at_ms: u64,
+    sensitivity: u8,
+) -> Result<TestDifferencePreviewResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        compute_difference_preview_sync(
+            baseline_path,
+            candidate_path,
+            baseline_file_size,
+            baseline_modified_at_ms,
+            candidate_file_size,
+            candidate_modified_at_ms,
+            sensitivity,
         )
     })
     .await
@@ -291,6 +360,32 @@ mod tests {
             left_info.modified_at_ms,
             right_info.file_size,
             right_info.modified_at_ms,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("重新导入"));
+    }
+
+    #[test]
+    fn difference_preview_rejects_changed_files() {
+        let dir = tempdir().unwrap();
+        let baseline = dir.path().join("baseline.png");
+        let candidate = dir.path().join("candidate.png");
+        write_fixture(&baseline, 32, 32, 100);
+        write_fixture(&candidate, 32, 32, 100);
+        let baseline_info = load_test_image_sync(baseline.to_string_lossy().into_owned()).unwrap();
+        let candidate_info =
+            load_test_image_sync(candidate.to_string_lossy().into_owned()).unwrap();
+        write_fixture(&candidate, 64, 64, 80);
+
+        let error = compute_difference_preview_sync(
+            baseline_info.path,
+            candidate_info.path,
+            baseline_info.file_size,
+            baseline_info.modified_at_ms,
+            candidate_info.file_size,
+            candidate_info.modified_at_ms,
+            50,
         )
         .unwrap_err();
 

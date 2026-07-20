@@ -5,6 +5,7 @@ pub mod delete;
 pub mod difference_finder;
 pub mod file_operations;
 pub mod hash;
+pub mod image_difference;
 pub mod image_features;
 pub mod image_metrics;
 pub mod matching;
