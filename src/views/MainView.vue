@@ -1,103 +1,120 @@
 <template>
   <div v-if="activeScreen !== 'workspace'" class="entry-view">
-    <section class="entry-panel">
-      <div class="task-cards">
-        <button type="button" class="task-card" @click="startNewTask">
-          <span class="task-icon">
-            <el-icon><Plus /></el-icon>
+    <div class="entry-viewport">
+      <div class="entry-slider" :class="{ 'is-history': activeScreen === 'history' }">
+      <section class="entry-panel menu-panel" aria-label="入口菜单">
+        <div class="task-cards">
+          <button type="button" class="task-card" @click="startNewTask">
+            <span class="task-icon">
+              <el-icon><Plus /></el-icon>
+            </span>
+            <span class="task-title">选择新建任务</span>
+            <span class="task-copy">进入多目录对比工作台，重新选择文件夹并开始计算</span>
+          </button>
+
+          <button type="button" class="task-card" @click="showHistory">
+            <span class="task-icon">
+              <el-icon><FolderOpened /></el-icon>
+            </span>
+            <span class="task-title">加载任务</span>
+            <span class="task-copy">从历史任务中加载已经计算过的结果</span>
+          </button>
+        </div>
+
+        <button type="button" class="tool-card" @click="openDifferenceFinder">
+          <span class="tool-card-icon" aria-hidden="true">
+            <el-icon><Search /></el-icon>
           </span>
-          <span class="task-title">选择新建任务</span>
-          <span class="task-copy">进入多目录对比工作台，重新选择文件夹并开始计算</span>
+          <span class="tool-card-content">
+            <span class="tool-card-title">找差分图</span>
+            <span class="tool-card-copy">用多张参考图，从多个目录查找差分、重复与相关组图</span>
+          </span>
+          <span class="tool-card-action">打开独立窗口</span>
         </button>
 
-        <button type="button" class="task-card" @click="showHistory">
-          <span class="task-icon">
-            <el-icon><FolderOpened /></el-icon>
+        <button
+          type="button"
+          class="compact-task-card"
+          data-test="open-image-metrics"
+          @click="openMetricsTest"
+        >
+          <span class="compact-task-icon">
+            <el-icon><DataAnalysis /></el-icon>
           </span>
-          <span class="task-title">加载任务</span>
-          <span class="task-copy">从历史任务中加载已经计算过的结果</span>
+          <span class="compact-task-content">
+            <span class="compact-task-title">图片指标测试</span>
+            <span class="compact-task-copy">
+              临时比较多张图片的感知哈希与标准 SSIM，不保存记录
+            </span>
+          </span>
+          <span class="compact-task-action">打开独立窗口</span>
         </button>
-      </div>
-
-      <button type="button" class="tool-card" @click="openDifferenceFinder">
-        <span class="tool-card-icon" aria-hidden="true">
-          <el-icon><Search /></el-icon>
-        </span>
-        <span class="tool-card-content">
-          <span class="tool-card-title">找差分图</span>
-          <span class="tool-card-copy">用多张参考图，从多个目录查找差分、重复与相关组图</span>
-        </span>
-        <span class="tool-card-action">打开独立窗口</span>
-      </button>
-
-      <button
-        type="button"
-        class="compact-task-card"
-        data-test="open-image-metrics"
-        @click="openMetricsTest"
-      >
-        <span class="compact-task-icon">
-          <el-icon><DataAnalysis /></el-icon>
-        </span>
-        <span class="compact-task-content">
-          <span class="compact-task-title">图片指标测试</span>
-          <span class="compact-task-copy">
-            临时比较多张图片的感知哈希、当前相似度与标准结构相似性，不保存记录
-          </span>
-        </span>
-        <span class="compact-task-action">打开独立窗口</span>
-      </button>
-
-      <section v-if="activeScreen === 'history'" class="history-panel">
-        <div class="history-header">
-          <div>
-            <h2>历史任务</h2>
-            <p>删除任务只会清理数据库记录，不会删除任何图片文件。</p>
-          </div>
-          <el-button
-            :icon="Refresh"
-            :loading="comparisonStore.isLoadingHistory"
-            @click="refreshHistory"
-          >
-            刷新
-          </el-button>
-        </div>
-
-        <div v-if="comparisonStore.historyRuns.length === 0" class="history-empty">
-          还没有历史任务
-        </div>
-
-        <div v-else class="history-list">
-          <article
-            v-for="run in comparisonStore.historyRuns"
-            :key="run.run_id"
-            class="history-row"
-          >
-            <button type="button" class="history-load" @click="loadHistoryRun(run.run_id)">
-              <span class="history-row-title">
-                <span class="status-dot" :class="statusClass(run.status)" />
-                {{ formatRunTime(run.created_at) }}
-              </span>
-              <span class="history-row-path">{{ formatPathSummary(run) }}</span>
-              <span class="history-row-meta">
-                {{ statusLabel(run.status) }} · {{ run.baseline_total }} 基准 · {{ run.comparison_total }} 对比 · {{ run.result_count }} 结果
-              </span>
-            </button>
-
-            <el-tooltip content="删除历史任务" placement="right-start">
-              <el-button
-                :icon="Delete"
-                type="danger"
-                plain
-                circle
-                aria-label="删除历史任务"
-                @click="deleteHistoryRun(run.run_id)"
-              />
-            </el-tooltip>
-          </article>
-        </div>
       </section>
-    </section>
+
+      <section v-if="activeScreen === 'history'" class="entry-panel history-page" aria-label="历史任务">
+        <section class="history-panel">
+          <div class="history-header">
+            <div class="history-heading">
+              <el-button
+                class="history-back"
+                data-test="history-back"
+                :icon="ArrowLeft"
+                plain
+                @click="backToEntry"
+              >
+                返回
+              </el-button>
+              <div>
+                <h2>历史任务</h2>
+                <p>删除任务只会清理数据库记录，不会删除任何图片文件。</p>
+              </div>
+            </div>
+            <el-button
+              :icon="Refresh"
+              :loading="comparisonStore.isLoadingHistory"
+              @click="refreshHistory"
+            >
+              刷新
+            </el-button>
+          </div>
+
+          <div v-if="comparisonStore.historyRuns.length === 0" class="history-empty">
+            还没有历史任务
+          </div>
+
+          <div v-else class="history-list">
+            <article
+              v-for="run in comparisonStore.historyRuns"
+              :key="run.run_id"
+              class="history-row"
+            >
+              <button type="button" class="history-load" @click="loadHistoryRun(run.run_id)">
+                <span class="history-row-title">
+                  <span class="status-dot" :class="statusClass(run.status)" />
+                  {{ formatRunTime(run.created_at) }}
+                </span>
+                <span class="history-row-path">{{ formatPathSummary(run) }}</span>
+                <span class="history-row-meta">
+                  {{ statusLabel(run.status) }} · {{ run.baseline_total }} 基准 · {{ run.comparison_total }} 对比 · {{ run.result_count }} 结果
+                </span>
+              </button>
+
+              <el-tooltip content="删除历史任务" placement="right-start">
+                <el-button
+                  :icon="Delete"
+                  type="danger"
+                  plain
+                  circle
+                  aria-label="删除历史任务"
+                  @click="deleteHistoryRun(run.run_id)"
+                />
+              </el-tooltip>
+            </article>
+          </div>
+        </section>
+      </section>
+      </div>
+    </div>
   </div>
 
   <div v-else class="main-view">
@@ -110,12 +127,74 @@
         <el-tooltip content="展开左栏" placement="right-start">
           <el-button
             :icon="Expand"
+            class="collapsed-expand-button"
             circle
             plain
             aria-label="展开左栏"
             @click="setStatsPanelCollapsed(false)"
           />
         </el-tooltip>
+
+        <div
+          v-if="comparisonStore.categoryStats.length > 0"
+          class="collapsed-stats"
+          data-test="collapsed-stats"
+          role="list"
+          aria-label="对比结果分类统计"
+        >
+          <el-tooltip
+            v-for="category in comparisonStore.categoryStats"
+            :key="category.type"
+            :content="collapsedStatTooltip(category.label, category.count)"
+            placement="right"
+            :show-after="200"
+          >
+            <span
+              class="collapsed-stat-badge"
+              :class="{ 'is-zero': category.count === 0 }"
+              :style="{ '--category-color': category.color }"
+              :data-test="`collapsed-stat-${category.type}`"
+              :aria-label="collapsedStatTooltip(category.label, category.count)"
+              role="listitem"
+              tabindex="0"
+            >
+              {{ formatCollapsedStatCount(category.count) }}
+            </span>
+          </el-tooltip>
+        </div>
+
+        <div
+          class="collapsed-tools-divider"
+          data-test="collapsed-tools-divider"
+          role="separator"
+          aria-label="快捷工具"
+        />
+
+        <nav class="collapsed-tools" aria-label="快捷工具">
+          <el-tooltip content="打开找差分图" placement="right">
+            <button
+              type="button"
+              class="collapsed-tool-button"
+              data-test="collapsed-open-difference-finder"
+              aria-label="打开找差分图"
+              @click="openDifferenceFinder"
+            >
+              <el-icon aria-hidden="true"><Search /></el-icon>
+            </button>
+          </el-tooltip>
+
+          <el-tooltip content="打开图片指标测试" placement="right">
+            <button
+              type="button"
+              class="collapsed-tool-button"
+              data-test="collapsed-open-image-metrics"
+              aria-label="打开图片指标测试"
+              @click="openMetricsTest"
+            >
+              <el-icon aria-hidden="true"><DataAnalysis /></el-icon>
+            </button>
+          </el-tooltip>
+        </nav>
       </div>
 
       <template v-else>
@@ -276,6 +355,14 @@ function setStatsPanelCollapsed(collapsed: boolean) {
   isStatsPanelCollapsed.value = collapsed
   saveStatsPanelCollapsed()
   handleWindowResize()
+}
+
+function formatCollapsedStatCount(count: number) {
+  return count > 99 ? '99+' : String(count)
+}
+
+function collapsedStatTooltip(label: string, count: number) {
+  return `${label}：${count} 张图片`
 }
 
 function startNewTask() {
@@ -531,14 +618,43 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.entry-panel {
+.entry-viewport {
   width: min(980px, calc(100vw - 48px));
   height: 100%;
+  overflow: hidden;
+}
+
+.entry-slider {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  transform: translateX(0);
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.entry-slider.is-history {
+  transform: translateX(-100%);
+}
+
+.entry-panel {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  flex: 0 0 100%;
   box-sizing: border-box;
   padding: 72px 0 48px;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+}
+
+.menu-panel {
+  overflow-y: auto;
+}
+
+.history-page {
+  padding: 48px 0;
+  overflow: hidden;
 }
 
 .task-cards {
@@ -741,7 +857,7 @@ onBeforeUnmount(() => {
 
 .history-panel {
   min-height: 0;
-  margin-top: 24px;
+  margin-top: 0;
   padding: 24px;
   border: 1px solid #dcdfe6;
   border-radius: 8px;
@@ -760,6 +876,17 @@ onBeforeUnmount(() => {
   margin-bottom: 18px;
 }
 
+.history-heading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.history-back {
+  flex: 0 0 auto;
+}
+
 .history-header h2 {
   margin: 0;
   font-size: 20px;
@@ -773,7 +900,8 @@ onBeforeUnmount(() => {
 }
 
 .history-empty {
-  min-height: 120px;
+  min-height: 0;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -893,15 +1021,106 @@ onBeforeUnmount(() => {
 
 .aside-panel.is-collapsed {
   min-width: 52px;
-  padding: 12px 8px;
+  padding: 12px 6px;
   align-items: center;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .aside-collapsed {
   width: 100%;
+  min-height: min-content;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.collapsed-expand-button,
+.collapsed-tool-button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+}
+
+.collapsed-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.collapsed-stat-badge {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
+  flex: 0 0 28px;
+  border: 1px solid color-mix(in srgb, var(--category-color) 78%, #303133);
+  border-radius: 50%;
+  outline: none;
+  background-color: var(--category-color);
+  color: #1d2129;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: help;
+  transition: opacity 0.15s ease, box-shadow 0.15s ease;
+}
+
+.collapsed-stat-badge.is-zero {
+  opacity: 0.42;
+  filter: saturate(0.55);
+}
+
+.collapsed-stat-badge:hover,
+.collapsed-stat-badge:focus-visible {
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--category-color) 28%, transparent);
+}
+
+.collapsed-tools-divider {
+  width: 28px;
+  height: 1px;
+  flex: 0 0 1px;
+  margin: 10px 0;
+  background-color: #dcdfe6;
+}
+
+.collapsed-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapsed-tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background-color: #ffffff;
+  color: #606266;
+  font-size: 18px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.collapsed-tool-button:hover,
+.collapsed-tool-button:focus-visible {
+  border-color: #409eff;
+  outline: none;
+  background-color: #ecf5ff;
+  color: #409eff;
+}
+
+.collapsed-tool-button:active {
+  background-color: #d9ecff;
 }
 
 .workspace-actions {
@@ -953,20 +1172,32 @@ onBeforeUnmount(() => {
   background: #409eff66;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .entry-slider {
+    transition: none;
+  }
+}
+
 @media (max-width: 760px) {
-  .entry-panel {
+  .entry-viewport {
     width: calc(100vw - 32px);
+  }
+
+  .entry-panel {
     padding-top: 32px;
   }
 
   .entry-view {
-    min-height: 100vh;
-    height: auto;
-    overflow-y: auto;
+    height: 100vh;
+    overflow: hidden;
   }
 
-  .entry-panel {
-    height: auto;
+  .history-page {
+    padding: 24px 0 32px;
+  }
+
+  .history-panel {
+    padding: 18px;
   }
 
   .task-cards {
@@ -991,6 +1222,11 @@ onBeforeUnmount(() => {
   }
 
   .history-header {
+    flex-direction: column;
+  }
+
+  .history-heading {
+    width: 100%;
     flex-direction: column;
   }
 }
