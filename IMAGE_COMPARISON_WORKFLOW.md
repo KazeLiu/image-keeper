@@ -235,7 +235,9 @@ aspectDiff = abs(aspectA - aspectX) / max(aspectA, aspectX)
 6. 缩放方向、目标尺寸、重采样算法和边界处理。
 7. 结构相似性的窗口大小、通道策略和常量参数。
 
-对于尺寸不同且宽高比可比的图片，统一把较高分辨率图片缩放到较低分辨率图片的尺寸后计算；不得把较低分辨率图片放大后再据此证明其质量更高。
+对于尺寸不同且宽高比可比的图片，统一到像素数较少图片的完整宽高；平局时按宽、高稳定选择目标尺寸。较大图片使用 Lanczos3 缩小，不设置 512px 上限，也不放大较小图片。
+
+当前标准 SSIM 固定使用灰度通道、11×11 高斯窗口、`sigma=1.5`、镜像边界，以及由 8 位动态范围推导的 `C1=6.5025`、`C2=58.5225`。主流程、组内比较、找差分图和指标工具必须调用同一核心入口。
 
 无法按固定协议对齐的候选对标记为计算失败或不可比，不得生成删除建议。
 
@@ -399,11 +401,12 @@ JSON 是完整、可机器读取的主报告。示例：
   "runId": "20260713-170000-ab12cd",
   "applicationVersion": "0.1.0",
   "algorithmProfile": {
-    "id": "imagekeeper-v1-ssim",
+    "id": "imagekeeper-v3-standard-ssim-fullres",
     "hash": "blake3",
     "perceptualHashMaxDistance": 10,
     "compressedSsimThreshold": 0.995,
-    "normalizationVersion": 1
+    "normalizationVersion": 2,
+    "maxWorkers": 4
   },
   "roots": {
     "baseline": "A",
@@ -434,7 +437,7 @@ JSON 是完整、可机器读取的主报告。示例：
       "ssim": 0.996,
       "sourceResolution": [1920, 1080],
       "matchResolution": [3840, 2160],
-      "algorithmProfileId": "imagekeeper-v1-ssim"
+      "algorithmProfileId": "imagekeeper-v3-standard-ssim-fullres"
     }
   ]
 }
@@ -489,7 +492,7 @@ completed_with_errors | paused | canceled | failed
 - 感知哈希使用近邻索引，禁止在目标图库规模下默认全量笛卡尔积。
 - 结构相似性只处理候选对，并记录候选数量、截断数量和实际耗时。
 - 特征缓存按文件指纹和算法版本失效。
-- 并行计算不得共享不安全的数据库连接；计算结果通过有界队列批量持久化。
+- 图片解码、pHash 和 SSIM 统一进入 4 线程有界算法池；并行计算不得共享不安全的数据库连接，计算结果在单一持久化边界串行写入。
 - 并发只影响性能，不能改变候选排序、分类结果或主匹配选择。
 - 进度使用稳定阶段 ID，不把感知哈希阶段显示为错误的 Phase 编号。
 

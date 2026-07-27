@@ -2,8 +2,10 @@ pub mod compute;
 pub mod resize;
 pub mod standard;
 
+use crate::core::algorithm_profile::algorithm_pool;
 use crate::db::repository::Repository;
 use crate::error::Result;
+use rayon::prelude::*;
 use std::path::Path;
 
 /// 结构相似性引擎
@@ -24,13 +26,20 @@ impl SsimEngine {
         // 获取所有待计算结构相似性的配对
         let pairs = Self::get_pending_pairs(scan_id, repository)?;
 
-        // 顺序计算结构相似性（rusqlite Connection 不支持跨线程共享）
-        for (pair_id, larger_path, smaller_path) in &pairs {
-            // 计算结构相似性
-            let ssim_score = compute::SsimComputer::compute_from_files(
-                Path::new(larger_path),
-                Path::new(smaller_path),
-            )?;
+        // 算法在线程池中并行执行，数据库连接仍只在当前线程串行使用。
+        let scores = algorithm_pool().install(|| {
+            pairs
+                .par_iter()
+                .map(|(_, left_path, right_path)| {
+                    compute::SsimComputer::compute_from_files(
+                        Path::new(left_path),
+                        Path::new(right_path),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        for ((pair_id, _, _), score) in pairs.iter().zip(scores) {
+            let ssim_score = score?;
 
             // 判断是否为压缩版本
             let is_compressed = ssim_score >= ssim_threshold;

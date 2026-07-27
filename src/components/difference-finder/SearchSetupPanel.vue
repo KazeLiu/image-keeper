@@ -2,9 +2,8 @@
   <section class="panel setup-panel" aria-labelledby="folder-title">
     <div class="panel-heading">
       <div>
-        <span class="step">02</span>
         <h2 id="folder-title">搜索目录</h2>
-        <p>目录只扫描一次，多张参考图复用同一批特征。</p>
+        <p>选择需要查找图片的文件夹。</p>
       </div>
       <el-button plain :icon="FolderAdd" @click="chooseFolders">添加目录</el-button>
     </div>
@@ -22,8 +21,15 @@
       <el-switch v-model="store.recursive" active-text="递归子目录" />
       <div class="action-buttons">
         <el-button v-if="store.isRunning" type="danger" plain @click="store.cancel">取消</el-button>
-        <el-button v-else type="primary" :disabled="!store.canSearch" :icon="Search" @click="runSearch">
-          开始查找
+        <el-button
+          v-else
+          type="primary"
+          data-test="start-search"
+          :disabled="!store.canSearch"
+          :icon="Search"
+          @click="runSearch"
+        >
+          确定并开始查找
         </el-button>
       </div>
     </div>
@@ -49,6 +55,7 @@ import { Close, Folder, FolderAdd, Search } from '@element-plus/icons-vue'
 import { useDifferenceFinderStore } from '@/stores/differenceFinderStore'
 
 const store = useDifferenceFinderStore()
+const emit = defineEmits<{ searchComplete: [] }>()
 const phaseLabels = {
   scanning: '发现图片文件', extracting: '提取图片特征', matching: '与参考图匹配',
   aggregating: '汇总匹配结果', completed: '查找完成'
@@ -68,7 +75,7 @@ async function chooseFolders() {
 async function runSearch() {
   try {
     await store.search()
-    ElMessage.success(`查找完成，共发现 ${store.matches.length} 个相关文件`)
+    emit('searchComplete')
   } catch (error: any) {
     ElMessage.error(error?.message || String(error) || '查找失败')
   }
@@ -79,9 +86,8 @@ async function runSearch() {
 .panel { border: 1px solid #dcdfe6; border-radius: 10px; background: #fff; }
 .setup-panel { padding: 18px; }
 .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
-.panel-heading h2 { display: inline; margin: 0 0 0 8px; font-size: 17px; }
-.panel-heading p { margin: 5px 0 0 32px; color: #606266; font-size: 12px; }
-.step { color: #409eff; font-size: 12px; font-weight: 800; }
+.panel-heading h2 { margin: 0; font-size: 17px; }
+.panel-heading p { margin: 5px 0 0; color: #606266; font-size: 12px; }
 .folder-list { max-height: 112px; display: flex; flex-direction: column; gap: 7px; overflow-y: auto; }
 .folder-row { min-height: 34px; padding-left: 10px; border: 1px solid #ebeef5; border-radius: 6px; display: flex; align-items: center; gap: 8px; color: #606266; }
 .folder-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }

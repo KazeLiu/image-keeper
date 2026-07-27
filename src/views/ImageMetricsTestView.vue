@@ -21,30 +21,43 @@
 
           <div class="guide-content">
             <div class="guide-card">
-              <div class="guide-heading">感知哈希距离</div>
+              <div class="guide-heading">
+                感知哈希距离
+                <span class="guide-tag">快速粗筛</span>
+              </div>
               <div class="guide-help">
-                范围 0–64，越小表示视觉特征越接近；0 不代表文件或像素完全一致。
+                <p><strong>怎么看：</strong>它是两个 64 位视觉指纹中不同位的数量，范围为 0–64；数值越小，整体画面越可能接近。</p>
+                <p><strong>它的作用：</strong>只负责快速找出可能相似的候选，减少后续精细计算的数量。</p>
+                <p><strong>注意：</strong>距离为 0 只表示感知哈希相同，不代表文件或每个像素完全一致，不能单独用来判断重复或删除。</p>
               </div>
             </div>
 
             <div class="guide-card">
-              <div class="guide-heading">低精度结构相似性</div>
+              <div class="guide-heading">
+                标准 SSIM
+                <span class="guide-tag">精细对比</span>
+              </div>
               <div class="guide-help">
-                范围 0–1，越接近 1 越相似；复现主程序当前的灰度像素差算法。
+                <p><strong>怎么看：</strong>直接显示原始值，不转换成百分比。越接近 1，归一化后的亮度、对比度和局部结构通常越相似；标准公式也可能得到负值。</p>
+                <p><strong>它的作用：</strong>使用 11×11、σ=1.5 的高斯窗口，对感知哈希筛出的候选做更细的结构比较。</p>
+                <p><strong>注意：</strong>数值高只表示画面结构更接近，不代表当前图一定是原图、压缩图或低质量图。</p>
               </div>
             </div>
 
             <div class="guide-card">
-              <div class="guide-heading">标准结构相似性</div>
+              <div class="guide-heading">两个指标如何配合</div>
               <div class="guide-help">
-                越接近 1 通常越相似，标准公式可能出现负值；仅在点击单张卡片后计算。
+                <p>感知哈希先粗筛“可能相似”，标准 SSIM 再确认“结构有多接近”。两项结果不一致时，通常需要检查裁剪、文字、调色、边框或构图变化。</p>
+                <p>本页只展示算法证据，不给出删除结论。主程序还会综合文件哈希、分辨率、文件大小、宽高比和候选冲突，做更保守的分类。</p>
               </div>
             </div>
 
             <div class="guide-card">
-              <div class="guide-heading">尺寸处理</div>
+              <div class="guide-heading">算法一致性与尺寸处理</div>
               <div class="guide-help">
-                低精度复用主程序尺寸策略且最长边 512px；标准结构相似性不使用 200px 缩略图或 512px 限制，仅将较大原图缩小到较小原图的完整分辨率。
+                <p>与主程序、组内交叉比较和找差分图共用同一套实现，不再存在数值不同的低精度 SSIM。</p>
+                <p>较大图片使用 Lanczos3 缩小到较小图片的完整宽高后再计算；不读取 200px 缩略图，也不使用 512px 限制。</p>
+                <p>图片解码、感知哈希和标准 SSIM 统一受最多 4 路共享并行计算限制。</p>
               </div>
             </div>
           </div>
@@ -111,7 +124,13 @@
               @keydown.enter.prevent="selectBaseline(item.path)"
               @keydown.space.prevent="selectBaseline(item.path)"
             >
-            <div class="image-wrap" @click.stop>
+            <div
+              v-loading="isDifferenceLoading(item)"
+              class="image-wrap"
+              :class="{ 'is-difference-active': isDifferenceActive(item) }"
+              element-loading-text="正在生成差异高亮…"
+              @click.stop
+            >
               <el-skeleton v-if="item.loadState === 'loading'" animated class="inline-loading">
                 <template #template>
                   <el-skeleton-item variant="image" class="inline-loading-image" />
@@ -120,10 +139,10 @@
               <el-image
                 v-else
                 class="metrics-image"
-                :src="item.thumbnailDataUrl"
-                :preview-src-list="previewUrls"
-                :initial-index="previewIndex(item)"
-                :alt="item.fileName"
+                :src="displayImageSource(item)"
+                :preview-src-list="imagePreviewUrls(item)"
+                :initial-index="imagePreviewIndex(item)"
+                :alt="isDifferenceHighlighted(item) ? `${item.fileName} 的差异高亮` : item.fileName"
                 fit="contain"
                 preview-teleported
               >
@@ -138,7 +157,7 @@
                 plain
                 size="small"
                 :aria-label="`移除 ${item.fileName}`"
-                @click.stop="session.remove(item.path)"
+                @click.stop="removeImage(item.path)"
               />
             </div>
 
@@ -146,9 +165,40 @@
               <el-tooltip :content="item.fileName" placement="right-start">
                 <h2 class="file-name">{{ item.fileName }}</h2>
               </el-tooltip>
-              <p class="file-meta">
-                {{ item.loadState === 'loading' ? '加载中…' : formatFileSize(item.fileSize) }}
-              </p>
+              <div class="file-meta">
+                <span>{{ item.loadState === 'loading' ? '加载中…' : formatFileSize(item.fileSize) }}</span>
+                <el-button
+                  v-if="item.loadState === 'ready' && session.baselinePath.value && item.path !== session.baselinePath.value"
+                  class="difference-toggle"
+                  :type="isDifferenceActive(item) ? 'primary' : 'default'"
+                  :plain="!isDifferenceActive(item)"
+                  size="small"
+                  :icon="View"
+                  :loading="isDifferenceLoading(item)"
+                  :aria-pressed="isDifferenceActive(item)"
+                  :data-test="`difference-${index}`"
+                  @click.stop="toggleDifferenceHighlight(item)"
+                >
+                  差异高亮
+                </el-button>
+              </div>
+
+              <div
+                v-if="isDifferenceActive(item) && differencePreview.error.value"
+                class="difference-inline-error"
+                role="alert"
+              >
+                <span>差异高亮生成失败：{{ differencePreview.error.value }}</span>
+                <el-button
+                  text
+                  type="primary"
+                  size="small"
+                  :data-test="`difference-retry-${index}`"
+                  @click.stop="differencePreview.retry"
+                >
+                  重试
+                </el-button>
+              </div>
 
               <div v-if="item.loadState === 'loading'" class="baseline-label is-loading">
                 正在读取图片
@@ -160,69 +210,42 @@
 
               <div v-else class="metrics-list">
                 <div class="metrics-inline">
-                  <el-tooltip :content="phashTooltip(item.phash)" placement="right-start">
+                  <el-tooltip placement="right-start">
+                    <template #content>
+                      <div class="phash-tooltip-content">
+                        <div class="phash-tooltip-line">
+                          标准图感知哈希：{{ baselineItem?.phash || '未选择标准图' }}
+                        </div>
+                        <div class="phash-tooltip-line">
+                          当前图片感知哈希：{{ item.phash }}
+                        </div>
+                      </div>
+                    </template>
                     <span class="metric-chip">
                       <span>感知哈希距离：</span>
                       <span class="metric-value">{{ phashValue(item) }}</span>
                     </span>
                   </el-tooltip>
                   <span class="metric-chip">
-                    <span>低精度结构相似性：</span>
+                    <span>标准 SSIM：</span>
                     <el-button
-                      v-if="item.low.status === 'error'"
+                      v-if="item.ssim.status === 'error'"
                       text
                       type="primary"
                       size="small"
-                      :data-test="`low-${index}`"
-                      @click.stop="requestLowPrecision(item.path)"
+                      :data-test="`ssim-${index}`"
+                      @click.stop="requestSsim(item.path)"
                     >
                       重试
                     </el-button>
                     <span v-else class="metric-value">
-                      {{ lowPrecisionValue(item) }}
+                      {{ ssimValue(item) }}
                     </span>
                   </span>
-                  <span class="metric-chip">
-                    <span>标准结构相似性：</span>
-                    <template v-if="item.high.status === 'done'">
-                      <span class="metric-value">
-                        {{ formatScore(item.high.value.score) }} · {{ formatDuration(item.high.value.durationMs) }}
-                      </span>
-                    </template>
-                    <span v-else-if="item.high.status === 'loading'" class="metric-pending">
-                      计算中…
-                    </span>
-                    <el-button
-                      v-else
-                      text
-                      type="primary"
-                      size="small"
-                      :data-test="`high-${index}`"
-                      :disabled="!session.baselinePath.value"
-                      @click.stop="requestHighPrecision(item.path)"
-                    >
-                      {{ item.high.status === 'error' ? '重试' : '点击计算' }}
-                    </el-button>
-                  </span>
                 </div>
-                <p v-if="item.low.status === 'error'" class="metric-error">
-                  低精度失败：{{ item.low.error }}
+                <p v-if="item.ssim.status === 'error'" class="metric-error">
+                  标准 SSIM 失败：{{ item.ssim.error }}
                 </p>
-                <p v-if="item.high.status === 'error'" class="metric-error">
-                  标准结构相似性失败：{{ item.high.error }}
-                </p>
-                <div v-if="session.baselinePath.value" class="card-actions">
-                  <el-button
-                    text
-                    type="primary"
-                    size="small"
-                    :icon="View"
-                    :data-test="`difference-${index}`"
-                    @click.stop="openDifferencePreview(item)"
-                  >
-                    差异高亮
-                  </el-button>
-                </div>
               </div>
             </div>
             </article>
@@ -230,19 +253,6 @@
         </template>
       </section>
     </section>
-    <DifferenceHighlightDialog
-      :visible="differencePreview.visible.value"
-      :loading="differencePreview.loading.value"
-      :error="differencePreview.error.value"
-      :result="differencePreview.result.value"
-      :baseline-name="differencePreview.baseline.value?.fileName || ''"
-      :candidate-name="differencePreview.candidate.value?.fileName || ''"
-      :sensitivity="differencePreview.sensitivity.value"
-      @update:sensitivity="differencePreview.sensitivity.value = $event"
-      @refresh="differencePreview.refresh"
-      @retry="differencePreview.retry"
-      @close="differencePreview.close"
-    />
   </main>
 </template>
 
@@ -256,20 +266,18 @@ import { Close, Delete, FolderOpened, InfoFilled, PictureRounded, UploadFilled, 
 import {
   computeTestDifferencePreview,
   computeTestPhash,
-  computeTestLowPrecision,
-  computeTestStandardSsim,
+  computeTestSsim,
   loadTestImage
 } from '@/api/imageMetrics'
 import { createImageMetricsSession, type TestImageItem } from '@/features/imageMetrics/session'
 import { createDifferencePreview } from '@/features/imageMetrics/differencePreview'
-import DifferenceHighlightDialog from '@/components/image-metrics/DifferenceHighlightDialog.vue'
+import { formatSsim } from '@/features/similarity'
 
 const appWindow = getCurrentWindow()
 const session = createImageMetricsSession({
   loadImage: loadTestImage,
   computePhash: computeTestPhash,
-  computeLow: computeTestLowPrecision,
-  computeHigh: computeTestStandardSsim
+  computeSsim: computeTestSsim
 })
 const differencePreview = createDifferencePreview(computeTestDifferencePreview)
 const isDragging = ref(false)
@@ -285,6 +293,8 @@ const baselineItem = computed(() =>
 
 let unlistenClose: (() => void) | undefined
 let unlistenDrop: (() => void) | undefined
+let allowNextCloseRequest = false
+let closeConfirmationPending = false
 
 async function chooseImages() {
   try {
@@ -321,12 +331,50 @@ async function importPaths(paths: string[]) {
 function selectBaseline(path: string) {
   const item = session.items.value.find((item) => item.path === path)
   if (item?.loadState !== 'ready') return
+  differencePreview.close()
   void session.setBaseline(path)
 }
 
-function openDifferencePreview(candidate: TestImageItem) {
+function toggleDifferenceHighlight(candidate: TestImageItem) {
   if (!baselineItem.value || candidate.loadState !== 'ready') return
+  if (isDifferenceActive(candidate)) {
+    differencePreview.close()
+    return
+  }
   void differencePreview.open(baselineItem.value, candidate)
+}
+
+function isDifferenceActive(item: TestImageItem) {
+  return differencePreview.visible.value && differencePreview.candidate.value?.path === item.path
+}
+
+function isDifferenceLoading(item: TestImageItem) {
+  return isDifferenceActive(item) && differencePreview.loading.value
+}
+
+function isDifferenceHighlighted(item: TestImageItem) {
+  return isDifferenceActive(item) && Boolean(differencePreview.result.value)
+}
+
+function displayImageSource(item: TestImageItem) {
+  return isDifferenceHighlighted(item)
+    ? differencePreview.result.value!.highlightDataUrl
+    : item.thumbnailDataUrl
+}
+
+function imagePreviewUrls(item: TestImageItem) {
+  return isDifferenceHighlighted(item)
+    ? [differencePreview.result.value!.highlightDataUrl]
+    : previewUrls.value
+}
+
+function imagePreviewIndex(item: TestImageItem) {
+  return isDifferenceHighlighted(item) ? 0 : previewIndex(item)
+}
+
+function removeImage(path: string) {
+  differencePreview.close()
+  session.remove(path)
 }
 
 function previewIndex(item: TestImageItem) {
@@ -335,13 +383,8 @@ function previewIndex(item: TestImageItem) {
     .findIndex((candidate) => candidate.path === item.path)
 }
 
-async function requestHighPrecision(path: string) {
-  const started = await session.computeHighPrecision(path)
-  if (!started) ElMessage.info('请等待当前标准结构相似性计算完成')
-}
-
-async function requestLowPrecision(path: string) {
-  await session.retryLowPrecision(path)
+async function requestSsim(path: string) {
+  await session.retrySsim(path)
 }
 
 function clearAll() {
@@ -372,27 +415,22 @@ async function confirmDiscard() {
   }
 }
 
-function phashTooltip(candidatePhash: string) {
-  const baselinePhash = baselineItem.value?.phash || '未选择标准图'
-  return `标准图感知哈希：${baselinePhash}\n当前图片感知哈希：${candidatePhash}`
-}
-
 function phashValue(item: TestImageItem) {
   if (!session.baselinePath.value) return '等待中'
-  if (item.phashState === 'loading') return '计算中…'
   if (item.phashState === 'error') return '失败'
+  if (item.phashState === 'loading') return '计算中…'
+  if (!baselineItem.value || baselineItem.value.phashState === 'loading') return '计算中…'
+  if (baselineItem.value.phashState === 'error') return '失败'
   return item.phashDistance === null ? '失败' : String(item.phashDistance)
 }
 
-function lowPrecisionValue(item: TestImageItem) {
-  if (item.low.status === 'done') return formatScore(item.low.value.similarity)
-  if (item.low.status === 'error') return '失败'
-  if (item.low.status === 'loading') return '计算中…'
+function ssimValue(item: TestImageItem) {
+  if (item.ssim.status === 'done') {
+    return `${formatSsim(item.ssim.value.score)} · ${formatDuration(item.ssim.value.durationMs)}`
+  }
+  if (item.ssim.status === 'error') return '失败'
+  if (item.ssim.status === 'loading') return '计算中…'
   return '等待中'
-}
-
-function formatScore(value: number) {
-  return value.toFixed(6)
 }
 
 function formatFileSize(bytes: number) {
@@ -412,14 +450,32 @@ function message(error: unknown) {
 
 onMounted(async () => {
   unlistenClose = await appWindow.onCloseRequested((event) => {
+    if (allowNextCloseRequest) {
+      allowNextCloseRequest = false
+      return
+    }
     if (!session.hasContent.value) return
     event.preventDefault()
-    void confirmDiscard().then((confirmed) => {
-      if (!confirmed) return
-      void appWindow.close().catch((error) => {
-        ElMessage.error(`关闭窗口失败：${message(error)}`)
+    if (closeConfirmationPending) return
+    closeConfirmationPending = true
+    void confirmDiscard()
+      .then(async (confirmed) => {
+        if (!confirmed) return
+        allowNextCloseRequest = true
+        try {
+          await appWindow.close()
+        } catch (error) {
+          allowNextCloseRequest = false
+          ElMessage.error(`关闭窗口失败：${message(error)}`)
+        }
       })
-    })
+      .catch((error) => {
+        allowNextCloseRequest = false
+        ElMessage.error(`关闭确认失败：${message(error)}`)
+      })
+      .finally(() => {
+        closeConfirmationPending = false
+      })
   })
   unlistenDrop = await appWindow.onDragDropEvent(async (event) => {
     if (event.payload.type === 'over') {
@@ -500,6 +556,8 @@ defineExpose({ addImagePathsForTest: importPaths })
 
 .guide-content {
   padding: 0;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
   background: #ffffff;
   display: flex;
   flex-direction: column;
@@ -507,7 +565,7 @@ defineExpose({ addImagePathsForTest: importPaths })
 }
 
 .guide-card {
-  padding: 8px;
+  padding: 12px;
   border-radius: 8px;
   background: #f8fafc;
   border: 1px solid #edf1f7;
@@ -515,15 +573,40 @@ defineExpose({ addImagePathsForTest: importPaths })
 
 .guide-heading {
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 13px;
   font-weight: 600;
   color: #303133;
+}
+
+.guide-tag {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #ecf5ff;
+  color: #337ecc;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .guide-help {
   color: #909399;
   font-size: 12px;
   line-height: 18px;
+}
+
+.guide-help p {
+  margin: 0;
+}
+
+.guide-help p + p {
+  margin-top: 6px;
+}
+
+.guide-help strong {
+  color: #606266;
+  font-weight: 600;
 }
 
 .panel {
@@ -677,6 +760,11 @@ defineExpose({ addImagePathsForTest: importPaths })
   max-height: 140px;
   background: #f5f7fa;
   overflow: hidden;
+  transition: box-shadow 180ms ease;
+}
+
+.image-wrap.is-difference-active {
+  box-shadow: inset 0 0 0 2px #e6a23c;
 }
 
 .metrics-image {
@@ -727,9 +815,40 @@ defineExpose({ addImagePathsForTest: importPaths })
 
 .file-meta {
   margin: 5px 0 0;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   color: #909399;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+:deep(.difference-toggle) {
+  width: 94px;
+  height: 28px;
+  flex: 0 0 94px;
+}
+
+.difference-inline-error {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #f56c6c;
+  font-size: 12px;
+  line-height: 1.4;
+
+  span {
+    min-width: 0;
+  }
+
+  :deep(.el-button) {
+    min-height: 28px;
+    flex: 0 0 auto;
+  }
 }
 
 .baseline-label {
@@ -782,6 +901,14 @@ defineExpose({ addImagePathsForTest: importPaths })
   font-weight: 600;
 }
 
+:global(.phash-tooltip-content) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
 .metric-pending {
   color: #909399;
   font-weight: 400;
@@ -790,17 +917,6 @@ defineExpose({ addImagePathsForTest: importPaths })
 .is-error,
 .metric-error {
   color: #f56c6c;
-}
-
-.card-actions {
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid #ebeef5;
-
-  :deep(.el-button) {
-    min-height: 32px;
-    margin-left: -8px;
-  }
 }
 
 .metric-error {
@@ -821,7 +937,8 @@ defineExpose({ addImagePathsForTest: importPaths })
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .metrics-card {
+  .metrics-card,
+  .image-wrap {
     transition: none;
   }
 }

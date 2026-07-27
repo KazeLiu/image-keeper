@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   computeTestDifferencePreview,
-  computeTestLowPrecision,
   computeTestPhash,
+  computeTestSsim,
   type TestImageInfo
 } from './imageMetrics'
 
@@ -25,17 +25,21 @@ function image(path: string): TestImageInfo {
 describe('image metrics api', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('低精度图片任务不携带感知哈希数据', async () => {
-    invoke.mockResolvedValue({ similarity: 0.9, durationMs: 2 })
+  it('标准 ssim 任务携带两张图片的文件指纹', async () => {
+    invoke.mockResolvedValue({ score: 0.9, durationMs: 2 })
 
-    await computeTestLowPrecision(
+    await computeTestSsim(
       image('base'),
       image('candidate')
     )
 
-    expect(invoke).toHaveBeenCalledWith('compute_test_low_precision', {
+    expect(invoke).toHaveBeenCalledWith('compute_test_ssim', {
       baselinePath: 'base',
-      candidatePath: 'candidate'
+      candidatePath: 'candidate',
+      baselineFileSize: 100,
+      baselineModifiedAtMs: 1,
+      candidateFileSize: 100,
+      candidateModifiedAtMs: 1
     })
   })
 

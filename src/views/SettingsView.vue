@@ -9,13 +9,15 @@
       </template>
 
       <el-form :model="settingsForm" label-width="180px" label-position="left">
-        <el-form-item label="图片相似度阈值">
+        <el-form-item label="标准 SSIM 阈值">
           <el-slider
-            v-model="settingsForm.ssimThreshold"
-            :min="0.9"
-            :max="1.0"
-            :step="0.001"
-            :format-tooltip="formatSsimTooltip"
+            :model-value="settingsSliderValue"
+            :min="0"
+            :max="190"
+            :step="1"
+            :marks="settingsSliderMarks"
+            :format-tooltip="formatSettingsSliderTooltip"
+            @input="handleSsimSliderInput"
           />
           <span class="threshold-value">{{ formatSsimTooltip(settingsForm.ssimThreshold) }}</span>
         </el-form-item>
@@ -52,10 +54,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { ElMessage } from 'element-plus'
+import {
+  settingsSliderValueToThreshold,
+  settingsThresholdToSliderValue
+} from '@/features/similarity'
 
 const router = useRouter()
 const settingsStore = useSettingsStore()
@@ -68,13 +74,33 @@ const settingsForm = ref({
   autoRecycleCompressed: true
 })
 
+const settingsSliderMarks = {
+  0: '0.90',
+  50: '0.95',
+  90: '0.99',
+  190: '1.00'
+}
+
+const settingsSliderValue = computed(() =>
+  settingsThresholdToSliderValue(settingsForm.value.ssimThreshold)
+)
+
 onMounted(async () => {
   await settingsStore.loadSettings()
   settingsForm.value = { ...settingsStore.settings }
 })
 
 const formatSsimTooltip = (value: number) => {
-  return `${(value * 100).toFixed(1)}%`
+  return value.toFixed(4)
+}
+
+const formatSettingsSliderTooltip = (value: number) => {
+  return formatSsimTooltip(settingsSliderValueToThreshold(value))
+}
+
+const handleSsimSliderInput = (value: number | number[]) => {
+  const nextValue = Array.isArray(value) ? value[0] : value
+  settingsForm.value.ssimThreshold = settingsSliderValueToThreshold(nextValue)
 }
 
 const handleSave = async () => {

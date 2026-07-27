@@ -1,3 +1,4 @@
+use crate::core::algorithm_profile::algorithm_pool;
 use crate::core::image_features::{extract_image_features, phash_distance, ImageFeatures};
 use crate::core::ssim::compute::SsimComputer;
 use crate::error::{AppError, Result};
@@ -136,10 +137,22 @@ where
     let session_id = request.session_id.clone();
     let mut errors = Vec::new();
     let mut references = Vec::new();
-    for reference in &request.references {
+    let reference_results = algorithm_pool().install(|| {
+        request
+            .references
+            .par_iter()
+            .map(|reference| {
+                (
+                    reference.clone(),
+                    extract_image_features(Path::new(&reference.path)),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    for (reference, result) in reference_results {
         check_cancelled(&is_cancelled)?;
-        match extract_image_features(Path::new(&reference.path)) {
-            Ok(features) => references.push((reference.clone(), features)),
+        match result {
+            Ok(features) => references.push((reference, features)),
             Err(error) => errors.push(SearchFileError {
                 file_path: reference.path.clone(),
                 message: error.to_string(),
@@ -164,24 +177,26 @@ where
 
     let extracted = AtomicUsize::new(0);
     let total_files = target_files.len();
-    let feature_results: Vec<_> = target_files
-        .par_iter()
-        .map(|(root, path)| {
-            if is_cancelled() {
-                return (root.clone(), path.clone(), Err("搜索已取消".to_string()));
-            }
-            let result = extract_image_features(path).map_err(|error| error.to_string());
-            let processed = extracted.fetch_add(1, Ordering::Relaxed) + 1;
-            progress(DifferenceSearchProgress {
-                session_id: session_id.clone(),
-                phase: DifferenceSearchPhase::Extracting,
-                processed,
-                total: total_files,
-                current_file: Some(path.to_string_lossy().to_string()),
-            });
-            (root.clone(), path.clone(), result)
-        })
-        .collect();
+    let feature_results: Vec<_> = algorithm_pool().install(|| {
+        target_files
+            .par_iter()
+            .map(|(root, path)| {
+                if is_cancelled() {
+                    return (root.clone(), path.clone(), Err("搜索已取消".to_string()));
+                }
+                let result = extract_image_features(path).map_err(|error| error.to_string());
+                let processed = extracted.fetch_add(1, Ordering::Relaxed) + 1;
+                progress(DifferenceSearchProgress {
+                    session_id: session_id.clone(),
+                    phase: DifferenceSearchPhase::Extracting,
+                    processed,
+                    total: total_files,
+                    current_file: Some(path.to_string_lossy().to_string()),
+                });
+                (root.clone(), path.clone(), result)
+            })
+            .collect()
+    });
     check_cancelled(&is_cancelled)?;
 
     let mut targets = Vec::new();
@@ -197,42 +212,51 @@ where
     }
 
     let total_pairs = references.len() * targets.len();
-    let mut processed_pairs = 0;
+    let processed_pairs = AtomicUsize::new(0);
+    let relation_results = algorithm_pool().install(|| {
+        targets
+            .par_iter()
+            .flat_map_iter(|(source_root, target)| {
+                references.iter().map(|(reference_input, reference)| {
+                    check_cancelled(&is_cancelled)?;
+                    let distance =
+                        phash_distance(&reference.phash, &target.phash).unwrap_or(u32::MAX);
+                    let exact = reference.blake3_hash == target.blake3_hash;
+                    let similarity = if exact {
+                        Some(1.0)
+                    } else if distance <= MAX_PHASH_DISTANCE {
+                        compute_similarity(reference, target).ok()
+                    } else {
+                        None
+                    };
+                    let relation = classify_relation(reference, target, distance, similarity).map(
+                        |classification| CandidateRelation {
+                            target: target.clone(),
+                            source_root: source_root.to_string_lossy().to_string(),
+                            reference_id: reference_input.id.clone(),
+                            reference_path: reference_input.path.clone(),
+                            classification,
+                            phash_distance: distance,
+                            similarity: similarity.unwrap_or_default(),
+                        },
+                    );
+                    let processed = processed_pairs.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress(DifferenceSearchProgress {
+                        session_id: session_id.clone(),
+                        phase: DifferenceSearchPhase::Matching,
+                        processed,
+                        total: total_pairs,
+                        current_file: Some(target.file_path.clone()),
+                    });
+                    Ok(relation)
+                })
+            })
+            .collect::<Vec<Result<Option<CandidateRelation>>>>()
+    });
     let mut relations = Vec::new();
-    for (source_root, target) in &targets {
-        for (reference_input, reference) in &references {
-            check_cancelled(&is_cancelled)?;
-            processed_pairs += 1;
-            let distance = phash_distance(&reference.phash, &target.phash).unwrap_or(u32::MAX);
-            let exact = reference.blake3_hash == target.blake3_hash;
-            let similarity = if exact {
-                Some(1.0)
-            } else if distance <= MAX_PHASH_DISTANCE {
-                compute_similarity(reference, target).ok()
-            } else {
-                None
-            };
-
-            if let Some(classification) = classify_relation(reference, target, distance, similarity)
-            {
-                relations.push(CandidateRelation {
-                    target: target.clone(),
-                    source_root: source_root.to_string_lossy().to_string(),
-                    reference_id: reference_input.id.clone(),
-                    reference_path: reference_input.path.clone(),
-                    classification,
-                    phash_distance: distance,
-                    similarity: similarity.unwrap_or_default(),
-                });
-            }
-
-            progress(DifferenceSearchProgress {
-                session_id: session_id.clone(),
-                phase: DifferenceSearchPhase::Matching,
-                processed: processed_pairs,
-                total: total_pairs,
-                current_file: Some(target.file_path.clone()),
-            });
+    for result in relation_results {
+        if let Some(relation) = result? {
+            relations.push(relation);
         }
     }
 

@@ -89,6 +89,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { Warning } from '@element-plus/icons-vue'
 import { useDifferenceFinderStore } from '@/stores/differenceFinderStore'
 import type { DifferenceMatchItem, MatchClassification } from '@/api/differenceFinder'
+import { formatSsim } from '@/features/similarity'
 
 const store = useDifferenceFinderStore()
 const preview = ref<DifferenceMatchItem | null>(null)
@@ -112,7 +113,7 @@ function classificationLabel(value: MatchClassification) { return classification
 function classificationType(value: MatchClassification) {
   return value === 'exact' ? 'success' : value === 'variant' ? 'primary' : value === 'weak_candidate' ? 'warning' : 'info'
 }
-function formatSimilarity(value?: number | null) { return value == null ? '—' : `${(value * 100).toFixed(1)}%` }
+function formatSimilarity(value?: number | null) { return value == null ? '—' : formatSsim(value) }
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`

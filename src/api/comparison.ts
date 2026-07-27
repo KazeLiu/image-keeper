@@ -38,14 +38,12 @@ export async function getComparisonGroups(
 export async function getGroupSimilarityScores(
   runId: string,
   imageIds: number[],
-  requestId: string,
-  useHighPrecision = false
+  requestId: string
 ): Promise<GroupSimilarityScore[]> {
   return await invoke<GroupSimilarityScore[]>('get_group_similarity_scores', {
     runId,
     imageIds,
-    requestId,
-    useHighPrecision
+    requestId
   })
 }
 

@@ -1,121 +1,208 @@
 <template>
-  <section class="organizer-panel" aria-labelledby="organizer-title">
-    <div class="organizer-heading">
-      <div>
-        <span class="step">04</span>
-        <h2 id="organizer-title">批量整理</h2>
-        <el-tag size="small" effect="plain">{{ store.orderedSelectedMatches.length }}</el-tag>
+  <section class="file-panel" aria-labelledby="file-table-title">
+    <header class="table-toolbar">
+      <div class="table-title">
+        <div>
+          <h3 id="file-table-title">文件列表</h3>
+          <el-tag size="small" effect="plain">{{ store.filteredMatches.length }}</el-tag>
+        </div>
+        <p>勾选需要处理的文件，可直接修改新名称。</p>
       </div>
-      <el-button
-        type="primary"
-        plain
-        size="small"
-        :disabled="store.isRunning || !store.orderedSelectedMatches.length"
-        @click="quickRename"
-      >
-        按首项快速编号
-      </el-button>
+
+      <div class="table-filters">
+        <el-select v-model="referenceFilter" size="small" aria-label="按参考图片筛选">
+          <el-option label="全部参考图" value="all" />
+          <el-option
+            v-for="reference in store.references"
+            :key="reference.id"
+            :label="reference.name"
+            :value="reference.id"
+          />
+        </el-select>
+        <el-select v-model="store.classificationFilter" size="small" aria-label="按匹配类型筛选">
+          <el-option label="全部类型" value="all" />
+          <el-option v-for="item in classifications" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+        <el-button size="small" :disabled="!store.selectedPaths.length" @click="store.clearSelection">
+          清空选择
+        </el-button>
+      </div>
+    </header>
+
+    <div v-if="store.errors.length" class="scan-warning" role="status">
+      <el-icon><WarningFilled /></el-icon>
+      {{ store.errors.length }} 个文件无法读取，其他结果不受影响
     </div>
 
-    <template v-if="store.orderedSelectedMatches.length">
-      <div class="rule-panel">
-        <el-tabs v-model="ruleMode" class="rule-tabs">
-          <el-tab-pane label="简单模板" name="simple">
-            <label for="simple-template">新名称格式</label>
-            <div class="rule-input-row">
-              <el-input id="simple-template" v-model="simpleTemplate" placeholder="$ref-$n:02.$ext" />
-              <el-button type="primary" :loading="store.isPreviewing" @click="applyCurrentRule">应用</el-button>
-            </div>
-            <div class="variable-chips" aria-label="可用变量">
-              <button v-for="variable in variables" :key="variable.token" type="button" @click="insertVariable(variable.token)">
-                <code>{{ variable.token }}</code><span>{{ variable.label }}</span>
-              </button>
-            </div>
-          </el-tab-pane>
-          <el-tab-pane label="高级捕获" name="advanced">
-            <div class="advanced-grid">
-              <label>原名称匹配<el-input v-model="oldPattern" placeholder="*_*.png" /></label>
-              <label>新名称格式<el-input v-model="advancedTemplate" placeholder="$2-$1.png" /></label>
-            </div>
-            <div class="advanced-action">
-              <span>每个 <code>*</code> 依次对应 <code>$1</code>、<code>$2</code>……</span>
-              <el-button type="primary" :loading="store.isPreviewing" @click="applyCurrentRule">应用高级规则</el-button>
-            </div>
-          </el-tab-pane>
-        </el-tabs>
-
-        <el-collapse class="rule-help">
-          <el-collapse-item title="规则说明与示例" name="help">
-            <div class="example-grid">
-              <div><strong>按参考图编号</strong><code>$ref-$n:02.$ext</code><span>三月七-01.png</span></div>
-              <div><strong>添加固定前缀</strong><code>收藏-$name.$ext</code><span>收藏-立绘_微笑.png</span></div>
-              <div><strong>三位顺序号</strong><code>$name-$n:03.$ext</code><span>立绘-001.png</span></div>
-              <div><strong>交换两段</strong><code>*_*.png → $2-$1.png</code><span>表情_角色 → 角色-表情</span></div>
-              <div><strong>保留首尾片段</strong><code>*-*-*.jpg → $1_差分_$3.jpg</code><span>流萤-表情-07 → 流萤_差分_07</span></div>
-              <div><strong>捕获后重编号</strong><code>*_*.webp → $1-$n:02.$ext</code><span>卡芙卡_旧编号 → 卡芙卡-01</span></div>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
-        <p class="quick-help">快速重命名以第一行当前名称为基础，按拖拽顺序生成 <code>_1</code>、<code>_2</code>……并保留每张图原扩展名。</p>
+    <div v-if="store.filteredMatches.length" class="file-table" role="table" aria-label="查找结果与重命名表格">
+      <div class="table-row table-header" role="row">
+        <span role="columnheader">
+          <el-checkbox
+            data-test="select-all"
+            :model-value="allVisibleSelected"
+            :indeterminate="someVisibleSelected && !allVisibleSelected"
+            aria-label="选择全部当前结果"
+            @change="toggleAllVisible"
+          />
+        </span>
+        <span role="columnheader">图片</span>
+        <span role="columnheader">原文件</span>
+        <span role="columnheader">匹配类型</span>
+        <span role="columnheader">新文件名</span>
+        <span role="columnheader">状态</span>
       </div>
 
-      <div class="rename-grid" role="table" aria-label="批量重命名预览">
-        <div class="rename-header" role="row">
-          <span>顺序</span><span>图片</span><span>原名称</span><span>新名称</span><span>状态</span>
+      <div
+        v-for="item in store.filteredMatches"
+        :key="item.filePath"
+        class="table-row file-row"
+        :class="{ selected: isSelected(item.filePath), blocking: previewFor(item.filePath)?.blocking }"
+        data-test="file-row"
+        role="row"
+      >
+        <div class="select-cell" role="cell">
+          <el-checkbox
+            data-test="file-select"
+            :model-value="isSelected(item.filePath)"
+            :aria-label="`选择 ${item.fileName}`"
+            @change="store.toggleSelected(item.filePath, Boolean($event))"
+          />
         </div>
-        <div
-          v-for="(item, index) in displayRows"
-          :key="item.sourcePath"
-          class="rename-row"
-          :class="{ blocking: item.blocking }"
-          role="row"
-          draggable="true"
-          @dragstart="dragStart = index"
-          @dragover.prevent
-          @drop="dropAt(index)"
-        >
-          <div class="order-cell">
-            <button type="button" class="drag-handle" title="拖拽排序" aria-label="拖拽排序"><el-icon><Rank /></el-icon></button>
-            <span>{{ index + 1 }}</span>
-            <span class="order-buttons">
-              <el-button :icon="ArrowUp" text circle size="small" :disabled="index === 0" aria-label="上移" @click="moveRow(index, index - 1)" />
-              <el-button :icon="ArrowDown" text circle size="small" :disabled="index === displayRows.length - 1" aria-label="下移" @click="moveRow(index, index + 1)" />
-            </span>
-          </div>
-          <img class="rename-thumb" :src="convertFileSrc(item.sourcePath)" :alt="item.originalName" />
-          <span class="original-name" :title="item.originalName">{{ item.originalName }}</span>
+        <div role="cell">
+          <button type="button" class="thumb-button" :aria-label="`预览 ${item.fileName}`" @click="preview = item">
+            <img :src="convertFileSrc(item.filePath)" :alt="item.fileName" loading="lazy" />
+          </button>
+        </div>
+        <div class="file-cell" role="cell">
+          <strong :title="item.fileName">{{ item.fileName }}</strong>
+          <span :title="item.relativePath || item.filePath">{{ item.relativePath || item.filePath }}</span>
+          <small>{{ item.width }} × {{ item.height }} · {{ formatBytes(item.fileSize) }} · {{ item.format.toUpperCase() }}</small>
+        </div>
+        <div class="match-cell" role="cell">
+          <el-tag :type="classificationType(store.classificationForItem(item))" size="small">
+            {{ classificationLabel(store.classificationForItem(item)) }}
+          </el-tag>
+          <span>{{ store.referenceStem(item.bestReferenceId) }} · {{ similarityFor(item) }}</span>
+        </div>
+        <div class="name-cell" role="cell">
           <el-input
-            :model-value="editableNames[item.sourcePath] ?? item.proposedName"
-            :aria-label="`${item.originalName} 的新名称`"
-            @update:model-value="updateName(item.sourcePath, $event)"
+            :model-value="editableName(item.filePath, item.fileName)"
+            :disabled="!isSelected(item.filePath)"
+            :aria-label="`${item.fileName} 的新名称`"
+            @update:model-value="updateName(item.filePath, $event)"
             @blur="validateManualNames"
           />
-          <div class="status-cell">
-            <span v-if="item.blocking" class="status error"><el-icon><CircleCloseFilled /></el-icon>需修正</span>
-            <span v-else-if="item.issues.length" class="status warning"><el-icon><WarningFilled /></el-icon>{{ item.issues[0].message }}</span>
-            <span v-else class="status success"><el-icon><CircleCheckFilled /></el-icon>可执行</span>
-            <small v-if="item.issues.length" :title="item.issues.map(issue => issue.message).join('；')">
-              {{ item.issues.map(issue => issue.message).join('；') }}
-            </small>
+        </div>
+        <div class="status-cell" role="cell">
+          <template v-if="!isSelected(item.filePath)">
+            <span class="status muted">未选择</span>
+          </template>
+          <template v-else-if="!previewFor(item.filePath)">
+            <span class="status muted">正在检查</span>
+          </template>
+          <template v-else-if="previewFor(item.filePath)!.blocking">
+            <span class="status error"><el-icon><CircleCloseFilled /></el-icon>需修正</span>
+            <small :title="issueText(item.filePath)">{{ issueText(item.filePath) }}</small>
+          </template>
+          <template v-else-if="previewFor(item.filePath)!.issues.length">
+            <span class="status warning"><el-icon><WarningFilled /></el-icon>请注意</span>
+            <small :title="issueText(item.filePath)">{{ issueText(item.filePath) }}</small>
+          </template>
+          <span v-else class="status success"><el-icon><CircleCheckFilled /></el-icon>可执行</span>
+        </div>
+      </div>
+    </div>
+
+    <el-empty
+      v-else
+      :description="store.matches.length ? '当前筛选下没有结果' : '没有找到相关文件，可返回修改查找范围'"
+    />
+
+    <div v-if="store.orderedSelectedMatches.length" class="batch-tools">
+      <el-collapse v-model="expandedTools">
+        <el-collapse-item name="rename-rules">
+          <template #title>
+            <div class="collapse-title">
+              <strong>批量命名规则</strong>
+              <span>需要统一编号或替换名称时展开</span>
+            </div>
+          </template>
+
+          <div class="rule-panel">
+            <div class="rule-heading">
+              <span>应用到已勾选的 {{ store.orderedSelectedMatches.length }} 个文件</span>
+              <el-button size="small" :disabled="store.isRunning" @click="quickRename">按首项快速编号</el-button>
+            </div>
+
+            <el-tabs v-model="ruleMode" class="rule-tabs">
+              <el-tab-pane label="简单模板" name="simple">
+                <label for="simple-template">新名称格式</label>
+                <div class="rule-input-row">
+                  <el-input id="simple-template" v-model="simpleTemplate" placeholder="$ref-$n:02.$ext" />
+                  <el-button type="primary" :loading="store.isPreviewing" @click="applyCurrentRule">应用规则</el-button>
+                </div>
+                <div class="variable-chips" aria-label="可用变量">
+                  <button v-for="variable in variables" :key="variable.token" type="button" @click="insertVariable(variable.token)">
+                    <code>{{ variable.token }}</code><span>{{ variable.label }}</span>
+                  </button>
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="高级捕获" name="advanced">
+                <div class="advanced-grid">
+                  <label>原名称匹配<el-input v-model="oldPattern" placeholder="*_*.png" /></label>
+                  <label>新名称格式<el-input v-model="advancedTemplate" placeholder="$2-$1.png" /></label>
+                </div>
+                <div class="advanced-action">
+                  <span>每个 <code>*</code> 依次对应 <code>$1</code>、<code>$2</code>……</span>
+                  <el-button type="primary" :loading="store.isPreviewing" @click="applyCurrentRule">应用高级规则</el-button>
+                </div>
+              </el-tab-pane>
+            </el-tabs>
+
+            <details class="rule-help">
+              <summary>查看变量说明与示例</summary>
+              <div class="example-grid">
+                <div><strong>按参考图编号</strong><code>$ref-$n:02.$ext</code><span>三月七-01.png</span></div>
+                <div><strong>添加固定前缀</strong><code>收藏-$name.$ext</code><span>收藏-立绘_微笑.png</span></div>
+                <div><strong>交换两段</strong><code>*_*.png → $2-$1.png</code><span>表情_角色 → 角色-表情</span></div>
+              </div>
+            </details>
           </div>
+        </el-collapse-item>
+      </el-collapse>
+    </div>
+
+    <footer v-if="store.orderedSelectedMatches.length" class="operation-bar">
+      <div class="operation-summary" aria-live="polite">
+        已选择 <strong>{{ store.orderedSelectedMatches.length }}</strong> 个文件
+        <span v-if="blockingCount" class="summary-error">· {{ blockingCount }} 个冲突</span>
+      </div>
+      <div class="operation-actions">
+        <el-button :disabled="busy || store.isRunning" @click="copySelected">复制到…</el-button>
+        <el-button :disabled="busy || store.isRunning" @click="moveSelected">新建文件夹并移动</el-button>
+        <el-button v-if="lastBatch?.reversible" :disabled="busy || store.isRunning" @click="undoLast">撤销上次操作</el-button>
+        <el-button
+          type="primary"
+          :loading="busy"
+          :disabled="store.isRunning || blockingCount > 0 || !renameReady"
+          @click="executeRename"
+        >
+          执行重命名
+        </el-button>
+      </div>
+    </footer>
+
+    <el-dialog v-model="previewVisible" width="min(900px, 84vw)" title="图片预览" destroy-on-close>
+      <div v-if="preview" class="preview-dialog">
+        <img :src="convertFileSrc(preview.filePath)" :alt="preview.fileName" />
+        <div>
+          <h3>{{ preview.fileName }}</h3>
+          <p>{{ preview.filePath }}</p>
+          <p>{{ preview.width }} × {{ preview.height }} · {{ formatBytes(preview.fileSize) }}</p>
         </div>
       </div>
-
-      <div class="operation-bar">
-        <div class="operation-summary" aria-live="polite">
-          <strong>{{ displayRows.length }}</strong> 个文件
-          <span v-if="blockingCount" class="summary-error">· {{ blockingCount }} 个冲突</span>
-        </div>
-        <div class="operation-actions">
-          <el-button :disabled="busy || store.isRunning" @click="copySelected">复制到…</el-button>
-          <el-button :disabled="busy || store.isRunning" @click="moveSelected">新建文件夹并移动</el-button>
-          <el-button v-if="lastBatch?.reversible" :disabled="busy || store.isRunning" @click="undoLast">撤销上次操作</el-button>
-          <el-button type="primary" :loading="busy" :disabled="store.isRunning || blockingCount > 0" @click="executeRename">执行重命名</el-button>
-        </div>
-      </div>
-    </template>
-
-    <el-empty v-else description="从左侧结果中选择要整理的图片" />
+    </el-dialog>
   </section>
 </template>
 
@@ -124,9 +211,7 @@ import { computed, ref, watch } from 'vue'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import {
-  ArrowDown, ArrowUp, CircleCheckFilled, CircleCloseFilled, Rank, WarningFilled
-} from '@element-plus/icons-vue'
+import { CircleCheckFilled, CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue'
 import {
   copyDifferenceFiles,
   executeDifferenceRename,
@@ -134,10 +219,13 @@ import {
   previewDifferenceExplicitRename,
   previewDifferenceTransfer,
   undoDifferenceBatch,
+  type DifferenceMatchItem,
+  type MatchClassification,
   type OperationBatchResult,
   type RenamePreviewItem,
   type RenameRule
 } from '@/api/differenceFinder'
+import { formatSsim } from '@/features/similarity'
 import { useDifferenceFinderStore } from '@/stores/differenceFinderStore'
 
 const store = useDifferenceFinderStore()
@@ -147,12 +235,13 @@ const oldPattern = ref('*_*.png')
 const advancedTemplate = ref('$2-$1.png')
 const editableNames = ref<Record<string, string>>({})
 const manualPreview = ref<RenamePreviewItem[]>([])
-const dragStart = ref<number | null>(null)
 const busy = ref(false)
 const lastBatch = ref<OperationBatchResult | null>(null)
 const hasAppliedRule = ref(false)
 const manualOverrides = ref<Set<string>>(new Set())
 const appliedRule = ref<RenameRule>({ mode: 'simple', template: '$name.$ext' })
+const expandedTools = ref<string[]>([])
+const preview = ref<DifferenceMatchItem | null>(null)
 let validationTimer: number | null = null
 
 const variables = [
@@ -161,8 +250,26 @@ const variables = [
   { token: '$n:02', label: '01' }, { token: '$n:03', label: '001' },
   { token: '$group', label: '参考组' }
 ]
+const classifications: Array<{ value: MatchClassification; label: string }> = [
+  { value: 'exact', label: '完全相同' },
+  { value: 'compressed_or_reencoded', label: '压缩/重编码' },
+  { value: 'variant', label: '差分图' },
+  { value: 'related_group', label: '相关组图' },
+  { value: 'weak_candidate', label: '弱相关候选' }
+]
+
+const referenceFilter = computed({
+  get: () => store.activeReferenceId || 'all',
+  set: (value: string) => { store.activeReferenceId = value === 'all' ? null : value }
+})
 const displayRows = computed(() => manualPreview.value.length ? manualPreview.value : store.renamePreview)
+const previewRows = computed(() => new Map(displayRows.value.map(item => [normalizePath(item.sourcePath), item])))
 const blockingCount = computed(() => displayRows.value.filter(item => item.blocking).length)
+const renameReady = computed(() => displayRows.value.length === store.orderedSelectedMatches.length)
+const visibleSelectedCount = computed(() => store.filteredMatches.filter(item => isSelected(item.filePath)).length)
+const allVisibleSelected = computed(() => store.filteredMatches.length > 0 && visibleSelectedCount.value === store.filteredMatches.length)
+const someVisibleSelected = computed(() => visibleSelectedCount.value > 0)
+const previewVisible = computed({ get: () => Boolean(preview.value), set: value => { if (!value) preview.value = null } })
 
 watch(() => store.renamePreview, rows => {
   editableNames.value = Object.fromEntries(rows.map(item => [
@@ -176,7 +283,7 @@ watch(() => store.renamePreview, rows => {
 
 watch(
   () => store.orderedSelectedMatches
-    .map(item => item.filePath.replace(/\//g, '\\').toLowerCase())
+    .map(item => normalizePath(item.filePath))
     .sort()
     .join('|'),
   async signature => {
@@ -188,9 +295,7 @@ watch(
       manualOverrides.value = new Set()
       return
     }
-    await store.generateRenamePreview(
-      hasAppliedRule.value ? appliedRule.value : { mode: 'simple', template: '$name.$ext' }
-    )
+    await refreshAppliedRule()
   },
   { immediate: true }
 )
@@ -210,7 +315,9 @@ async function applyCurrentRule() {
 
 async function quickRename() {
   const first = displayRows.value[0]
-  const firstName = first ? (editableNames.value[first.sourcePath] || first.proposedName) : store.orderedSelectedMatches[0]?.fileName
+  const firstName = first
+    ? (editableNames.value[first.sourcePath] || first.proposedName)
+    : store.orderedSelectedMatches[0]?.fileName
   if (!firstName) return
   hasAppliedRule.value = true
   manualOverrides.value = new Set()
@@ -220,7 +327,31 @@ async function quickRename() {
 
 function insertVariable(token: string) { simpleTemplate.value += token }
 
+function isSelected(path: string) {
+  const key = normalizePath(path)
+  return store.selectedPaths.some(item => normalizePath(item) === key)
+}
+
+function toggleAllVisible(value: boolean | string | number) {
+  if (Boolean(value)) store.selectFiltered()
+  else store.clearSelection()
+}
+
+function previewFor(path: string) {
+  return previewRows.value.get(normalizePath(path))
+}
+
+function editableName(path: string, fallback: string) {
+  const row = previewFor(path)
+  return editableNames.value[path] ?? row?.proposedName ?? fallback
+}
+
+function issueText(path: string) {
+  return previewFor(path)?.issues.map(issue => issue.message).join('；') || ''
+}
+
 function updateName(path: string, value: string | number) {
+  if (!isSelected(path)) return
   manualOverrides.value = new Set(manualOverrides.value).add(normalizePath(path))
   editableNames.value = { ...editableNames.value, [path]: String(value) }
   if (validationTimer !== null) window.clearTimeout(validationTimer)
@@ -237,39 +368,27 @@ async function validateManualNames() {
   return manualPreview.value
 }
 
-async function dropAt(index: number) {
-  if (dragStart.value === null || dragStart.value === index) return
-  store.reorderSelected(dragStart.value, index)
-  dragStart.value = null
-  await refreshAppliedRule()
-}
-
-async function moveRow(from: number, to: number) {
-  store.reorderSelected(from, to)
-  await refreshAppliedRule()
-}
-
 async function executeRename() {
-  const preview = await validateManualNames()
-  const previewSources = preview.map(item => normalizePath(item.sourcePath)).sort()
+  const renamePreview = await validateManualNames()
+  const previewSources = renamePreview.map(item => normalizePath(item.sourcePath)).sort()
   const selectedSources = store.orderedSelectedMatches.map(item => normalizePath(item.filePath)).sort()
   if (previewSources.join('|') !== selectedSources.join('|')) {
     ElMessage.error('选择内容已变化，请重新生成重命名预览')
     await refreshAppliedRule()
     return
   }
-  if (preview.some(item => item.blocking)) {
+  if (renamePreview.some(item => item.blocking)) {
     ElMessage.error('请先处理标红的文件名冲突')
     return
   }
   await ElMessageBox.confirm(
-    `将重命名 ${preview.length} 个文件。不会覆盖已有同名文件。`,
+    `将重命名 ${renamePreview.length} 个文件。不会覆盖已有同名文件。`,
     '确认批量重命名',
     { confirmButtonText: '执行重命名', cancelButtonText: '返回检查', type: 'warning' }
   )
   busy.value = true
   try {
-    const batch = await executeDifferenceRename(preview.map(item => ({
+    const batch = await executeDifferenceRename(renamePreview.map(item => ({
       sourcePath: item.sourcePath,
       newName: editableNames.value[item.sourcePath] || item.proposedName,
       expectedFingerprint: fingerprintFor(item.sourcePath)
@@ -295,13 +414,13 @@ async function moveSelected() {
   })
   const destination = `${parent.replace(/[\\/]$/, '')}\\${value.trim()}`
   const request = { files: selectedTransferFiles(), targetDirectory: parent, newFolderName: value.trim() }
-  const preview = await previewDifferenceTransfer(request)
-  if (preview.items.some(item => item.issues.some(issue => ['source_missing', 'source_changed'].includes(issue.kind)))) {
+  const transferPreview = await previewDifferenceTransfer(request)
+  if (transferPreview.items.some(item => item.issues.some(issue => ['source_missing', 'source_changed'].includes(issue.kind)))) {
     ElMessage.error('部分文件在搜索后已变化，请重新搜索后再移动')
     return
   }
   await ElMessageBox.confirm(
-    transferConfirmation('移动', preview.destination || destination, preview.conflictCount, preview.items.map(item => item.targetPath)),
+    transferConfirmation('移动', transferPreview.destination || destination, transferPreview.conflictCount, transferPreview.items.map(item => item.targetPath)),
     '确认新建文件夹并移动',
     { confirmButtonText: '确认移动', cancelButtonText: '取消', type: 'warning' }
   )
@@ -319,13 +438,13 @@ async function copySelected() {
   const target = await open({ directory: true, multiple: false, title: '选择复制目标目录' })
   if (!target || Array.isArray(target)) return
   const request = { files: selectedTransferFiles(), targetDirectory: target }
-  const preview = await previewDifferenceTransfer(request)
-  if (preview.items.some(item => item.issues.some(issue => ['source_missing', 'source_changed'].includes(issue.kind)))) {
+  const transferPreview = await previewDifferenceTransfer(request)
+  if (transferPreview.items.some(item => item.issues.some(issue => ['source_missing', 'source_changed'].includes(issue.kind)))) {
     ElMessage.error('部分文件在搜索后已变化，请重新搜索后再复制')
     return
   }
   await ElMessageBox.confirm(
-    transferConfirmation('复制', preview.destination, preview.conflictCount, preview.items.map(item => item.targetPath)),
+    transferConfirmation('复制', transferPreview.destination, transferPreview.conflictCount, transferPreview.items.map(item => item.targetPath)),
     '确认批量复制',
     { confirmButtonText: '确认复制', cancelButtonText: '取消', type: 'warning' }
   )
@@ -376,52 +495,169 @@ function transferConfirmation(action: string, destination: string, conflicts: nu
   const remaining = Math.max(0, targets.length - 3)
   return `将${action} ${targets.length} 个文件到 ${destination}。检测到 ${conflicts} 个冲突（会安全跳过）。目标示例：${examples}${remaining ? `；另有 ${remaining} 个` : ''}`
 }
+
+function classificationLabel(value: MatchClassification) {
+  return classifications.find(item => item.value === value)?.label || value
+}
+
+function classificationType(value: MatchClassification) {
+  return value === 'exact' ? 'success' : value === 'variant' ? 'primary' : value === 'weak_candidate' ? 'warning' : 'info'
+}
+
+function similarityFor(item: DifferenceMatchItem) {
+  const relation = item.relations.find(value => value.referenceId === item.bestReferenceId) || item.relations[0]
+  return relation?.similarity == null ? '—' : formatSsim(relation.similarity)
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 ** 2).toFixed(1)} MB`
+}
 </script>
 
 <style scoped>
-.organizer-panel { min-height: 0; border: 1px solid #dcdfe6; border-radius: 10px; background: #fff; display: flex; flex-direction: column; overflow: hidden; }
-.organizer-heading { padding: 16px 18px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.organizer-heading > div { display: flex; align-items: center; gap: 8px; }
-.organizer-heading h2 { margin: 0; font-size: 17px; }
-.step { color: #409eff; font-size: 12px; font-weight: 800; }
-.rule-panel { margin: 0 14px 10px; padding: 10px 12px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafcff; }
+.file-panel {
+  min-height: 0;
+  flex: 1;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.table-toolbar {
+  padding: 12px 16px;
+  border-bottom: 1px solid #ebeef5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.table-title > div { display: flex; align-items: center; gap: 8px; }
+.table-title h3 { margin: 0; font-size: 16px; }
+.table-title p { margin: 3px 0 0; color: #606266; font-size: 12px; }
+.table-filters { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.table-filters .el-select:first-child { width: 174px; }
+.table-filters .el-select:nth-child(2) { width: 150px; }
+
+.scan-warning {
+  margin: 10px 16px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fdf6ec;
+  color: #946321;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.file-table { min-height: 0; flex: 1; overflow-y: auto; }
+.table-row {
+  min-width: 900px;
+  display: grid;
+  grid-template-columns: 42px 56px minmax(210px, 1.35fr) minmax(140px, .72fr) minmax(220px, 1.1fr) minmax(100px, .55fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.table-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 36px;
+  padding: 0 14px;
+  border-bottom: 1px solid #dcdfe6;
+  background: #f5f7fa;
+  color: #606266;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.file-row {
+  min-height: 70px;
+  padding: 7px 14px;
+  border-bottom: 1px solid #ebeef5;
+  transition: background-color .18s, box-shadow .18s;
+}
+
+.file-row.selected { background: #f4f8ff; box-shadow: inset 3px 0 #409eff; }
+.file-row.blocking { background: #fff5f5; box-shadow: inset 3px 0 #d03050; }
+.select-cell { display: flex; justify-content: center; }
+.thumb-button { width: 48px; height: 48px; padding: 0; border: 0; border-radius: 5px; overflow: hidden; background: #f2f3f5; cursor: pointer; }
+.thumb-button:focus-visible { outline: 2px solid #409eff; outline-offset: 2px; }
+.thumb-button img { width: 100%; height: 100%; display: block; object-fit: cover; }
+
+.file-cell,
+.match-cell,
+.status-cell { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.file-cell strong,
+.file-cell span,
+.status-cell small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-cell strong { font-size: 12px; font-weight: 650; }
+.file-cell span { color: #606266; font-size: 11px; }
+.file-cell small { color: #909399; font-size: 10px; font-variant-numeric: tabular-nums; }
+.match-cell { align-items: flex-start; }
+.match-cell span { color: #606266; font-size: 10px; }
+.name-cell { min-width: 0; }
+.name-cell :deep(.el-input.is-disabled .el-input__wrapper) { background: #f5f7fa; }
+.name-cell :deep(.el-input.is-disabled .el-input__inner) { color: #909399; -webkit-text-fill-color: #909399; }
+.status { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 650; }
+.status.error,
+.summary-error { color: #c9344e; }
+.status.warning { color: #946321; }
+.status.success { color: #3f7d20; }
+.status.muted { color: #909399; font-weight: 500; }
+.status-cell small { color: #909399; font-size: 10px; }
+
+.batch-tools { border-top: 1px solid #ebeef5; background: #fafcff; }
+.batch-tools :deep(.el-collapse) { border: 0; }
+.batch-tools :deep(.el-collapse-item__header) { height: 44px; padding: 0 16px; background: #fafcff; }
+.batch-tools :deep(.el-collapse-item__wrap) { background: #fafcff; }
+.batch-tools :deep(.el-collapse-item__content) { padding-bottom: 12px; }
+.collapse-title { display: flex; align-items: baseline; gap: 10px; }
+.collapse-title strong { color: #303133; font-size: 13px; }
+.collapse-title span { color: #909399; font-size: 11px; font-weight: 400; }
+.rule-panel { padding: 0 16px; }
+.rule-heading { margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; color: #606266; font-size: 11px; }
 .rule-tabs :deep(.el-tabs__header) { margin-bottom: 10px; }
 .rule-panel label { display: block; margin-bottom: 6px; color: #606266; font-size: 12px; font-weight: 600; }
 .rule-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .variable-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
 .variable-chips button { padding: 4px 7px; border: 1px solid #dcdfe6; border-radius: 5px; background: #fff; color: #606266; display: inline-flex; gap: 5px; cursor: pointer; font-size: 11px; }
-.variable-chips button:hover, .variable-chips button:focus-visible { border-color: #409eff; color: #409eff; }
-.variable-chips code { color: #409eff; }
+.variable-chips button:hover,
+.variable-chips button:focus-visible { border-color: #409eff; color: #409eff; }
+.variable-chips code { color: #337ecc; }
 .advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .advanced-action { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #606266; font-size: 11px; }
-.rule-help { margin-top: 8px; }
-.example-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.example-grid > div { padding: 8px; border: 1px solid #ebeef5; border-radius: 6px; background: #fff; display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
-.example-grid code { color: #409eff; word-break: break-all; }
+.rule-help { margin-top: 10px; color: #606266; font-size: 11px; }
+.rule-help summary { cursor: pointer; }
+.example-grid { margin-top: 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.example-grid > div { padding: 8px; border: 1px solid #ebeef5; border-radius: 6px; background: #fff; display: flex; flex-direction: column; gap: 3px; }
+.example-grid code { color: #337ecc; word-break: break-all; }
 .example-grid span { color: #909399; }
-.quick-help { margin: 8px 0 0; color: #606266; font-size: 11px; line-height: 1.5; }
-.rename-grid { min-height: 0; margin: 0 10px; flex: 1; overflow-y: auto; }
-.rename-header, .rename-row { display: grid; grid-template-columns: 94px 58px minmax(110px, .8fr) minmax(170px, 1.2fr) minmax(110px, .7fr); gap: 8px; align-items: center; }
-.rename-header { position: sticky; top: 0; z-index: 2; padding: 7px 9px; border-bottom: 1px solid #dcdfe6; background: #f5f7fa; color: #606266; font-size: 11px; font-weight: 650; }
-.rename-row { min-height: 64px; padding: 7px 9px; border-bottom: 1px solid #ebeef5; background: #fff; }
-.rename-row.blocking { background: #fff5f5; }
-.order-cell { display: flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
-.drag-handle { width: 30px; height: 36px; border: 0; background: transparent; color: #909399; cursor: grab; }
-.order-buttons { display: flex; }
-.rename-thumb { width: 52px; height: 52px; border-radius: 5px; object-fit: cover; background: #f2f3f5; }
-.original-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.status-cell { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.status { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 650; }
-.status.error, .summary-error { color: #d03050; }
-.status.warning { color: #b88230; }
-.status.success { color: #529b2e; }
-.status-cell small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #909399; font-size: 10px; }
-.operation-bar { padding: 12px 14px; border-top: 1px solid #dcdfe6; background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.operation-bar { padding: 11px 16px; border-top: 1px solid #dcdfe6; background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .operation-summary { color: #606266; font-size: 12px; }
-.operation-summary strong { color: #303133; font-size: 16px; }
+.operation-summary strong { color: #303133; font-size: 16px; font-variant-numeric: tabular-nums; }
 .operation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
-@media (max-width: 1120px) {
-  .rename-header, .rename-row { grid-template-columns: 80px 54px minmax(90px, .7fr) minmax(150px, 1.1fr) 100px; }
+.preview-dialog { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 18px; }
+.preview-dialog img { width: 100%; max-height: 68vh; object-fit: contain; background: #f2f3f5; }
+.preview-dialog h3 { margin-top: 0; word-break: break-all; }
+.preview-dialog p { color: #606266; word-break: break-all; }
+
+@media (max-width: 1080px) {
+  .table-toolbar { align-items: flex-start; }
+  .table-filters { flex-wrap: wrap; }
+  .table-row { grid-template-columns: 38px 52px minmax(190px, 1.2fr) 132px minmax(190px, 1fr) 92px; }
   .example-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-row { transition: none; }
 }
 </style>

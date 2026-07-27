@@ -6,14 +6,7 @@
           <div class="detail-title-block">
             <div class="header-title">第 {{ group.group_index }} 组</div>
             <div class="threshold-summary">
-              差分 {{ formatQualityPercent(originalRecognitionThreshold) }} · 低质量 {{ formatQualityPercent(store.qualitySelectionThreshold) }}
-              ·
-              <span
-                class="precision-summary"
-                :class="useHighPrecisionSimilarity ? 'is-high' : 'is-fast'"
-              >
-                {{ useHighPrecisionSimilarity ? '标准结构相似性' : '低精度' }}
-              </span>
+              原图拆分阈值 {{ formatSsimThreshold(originalRecognitionThreshold) }} · 自动勾选阈值 {{ formatSsimThreshold(store.qualitySelectionThreshold) }}
             </div>
           </div>
           <div class="detail-actions">
@@ -25,35 +18,35 @@
             >
               <template #reference>
                 <el-button :icon="Setting" plain size="small">
-                  识别设置
+                  判断阈值
                 </el-button>
               </template>
 
               <div class="quality-control">
                 <div class="quality-control-card">
                   <div class="quality-heading">
-                    <span>差分图识别阈值</span>
-                    <span class="quality-value">{{ formatQualityPercent(originalRecognitionThreshold) }}</span>
+                    <span>原图拆分阈值</span>
+                    <span class="quality-value">{{ formatSsimThreshold(originalRecognitionThreshold) }}</span>
                   </div>
                   <el-slider
                     class="quality-slider"
-                    :model-value="originalRecognitionPercent"
-                    :min="95"
-                    :max="100"
-                    :step="0.1"
+                    :model-value="originalRecognitionSliderValue"
+                    :min="0"
+                    :max="140"
+                    :step="1"
                     :marks="originalRecognitionMarks"
-                    :format-tooltip="formatPercentSliderTooltip"
+                    :format-tooltip="formatRecognitionSliderTooltip"
                     @input="handleOriginalRecognitionInput"
                   />
                   <div class="quality-help">
-                    用来判断大小相近的图片是否都算原图；数值越低，越容易把缩略图变成原图。
+                    系统先筛选总像素至少达到组内最大图 90%、且画面比例接近的图片，再检查任务记录的标准 SSIM。达到当前阈值时会单独列为原图。调低会拆出更多原图，调高会减少原图数量；组内代表图和系统参考图始终保留为原图。
                   </div>
                 </div>
 
                 <div class="quality-control-card">
                   <div class="quality-heading">
-                    <span>低质量勾选阈值</span>
-                    <span class="quality-value">{{ formatQualityPercent(store.qualitySelectionThreshold) }}</span>
+                    <span>自动勾选删除阈值</span>
+                    <span class="quality-value">{{ formatSsimThreshold(store.qualitySelectionThreshold) }}</span>
                   </div>
                   <el-slider
                     class="quality-slider"
@@ -67,24 +60,12 @@
                     @change="handleQualityThresholdChange"
                   />
                   <div class="quality-help">
-                    自动根据相似度勾选低质量的图片；
+                    只作用于已经归到某张原图下的候选图。候选图与该原图的标准 SSIM 达到阈值，并且总像素少于原图 90%、文件大小低于原图 75%，或被手动设为缩略图时，才会自动勾选。调低会勾选更多，调高会更保守；这里只改变自动勾选，不改变图片归属。
                   </div>
                 </div>
 
-                <div class="quality-control-card">
-                  <div class="quality-heading">
-                    <span>相似度对比精度</span>
-                    <el-switch
-                      :model-value="useHighPrecisionSimilarity"
-                      size="small"
-                      active-text="标准结构相似性"
-                      inactive-text="低精度"
-                      @change="handlePrecisionModeChange"
-                    />
-                  </div>
-                  <div class="quality-help">
-                    低精度速度更快，适合大批量图片；标准结构相似性会使用更完整的窗口算法重新判断，相似度更细，但等待时间会明显变长。
-                  </div>
+                <div class="quality-help">
+                  两个阈值只改变判断规则，不改变标准 SSIM 算法或已计算数值。组内 SSIM 固定使用完整较小分辨率，最多 4 路并行计算。
                 </div>
               </div>
             </el-popover>
@@ -264,7 +245,19 @@
                   </template>
                 </el-table-column>
 
-                <el-table-column label="相似度" width="96" align="center">
+                <el-table-column width="118" align="center">
+                  <template #header>
+                    <el-tooltip :content="candidateSsimColumnHelp" placement="top">
+                      <span
+                        class="column-header-help"
+                        tabindex="0"
+                        aria-label="与原图 SSIM 说明"
+                      >
+                        与原图 SSIM
+                        <el-icon><QuestionFilled /></el-icon>
+                      </span>
+                    </el-tooltip>
+                  </template>
                   <template #default="{ row: candidate }">
                     <span>{{ formatSimilarity(candidate.similarity) }}</span>
                   </template>
@@ -352,7 +345,19 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="原图依据" width="150" align="center">
+        <el-table-column width="150" align="center">
+          <template #header>
+            <el-tooltip :content="originalBasisColumnHelp" placement="top">
+              <span
+                class="column-header-help"
+                tabindex="0"
+                aria-label="原图依据说明"
+              >
+                原图依据
+                <el-icon><QuestionFilled /></el-icon>
+              </span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
             <el-tooltip :content="row.reason" placement="right-start">
               <el-tag :type="row.source === 'manual' ? 'primary' : 'success'" size="small" effect="light">
@@ -454,16 +459,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Loading, Setting } from '@element-plus/icons-vue'
+import { Loading, QuestionFilled, Setting } from '@element-plus/icons-vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { batchRecycleImages, getGroupSimilarityScores } from '@/api/comparison'
 import { useComparisonStore } from '@/stores/comparisonStore'
 import type { ComparisonGroupMember, GroupSimilarityProgress, GroupSimilarityScore } from '@/types'
+import {
+  formatSsim,
+  parseStoredRecognitionThreshold,
+  precisionSliderValueToThreshold,
+  precisionThresholdToSliderValue,
+  qualitySliderValueToThreshold,
+  qualityThresholdToSliderValue
+} from '@/features/similarity'
 
 const store = useComparisonStore()
-const ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
-const HIGH_PRECISION_SIMILARITY_KEY = 'imagekeeper:high-precision-similarity'
+const candidateSsimColumnHelp = '候选图与当前所在行原图的标准 SSIM。该值用于自动勾选删除阈值，不用于决定原图拆分。'
+const originalBasisColumnHelp = '说明图片为何被列为原图。自动识别会综合分辨率、画面比例和原图拆分阈值；手动设置优先。'
+const ORIGINAL_RECOGNITION_THRESHOLD_KEY = 'imagekeeper:original-recognition-ssim'
+const LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
 const GROUP_SCORE_CACHE_LIMIT = 30
 
 type OriginalRowSource = 'auto' | 'manual' | 'fallback'
@@ -490,8 +505,7 @@ const viewerIndex = ref(0)
 const viewerZoom = ref(1)
 const thresholdPopoverVisible = ref(false)
 const isRecycling = ref(false)
-const originalRecognitionPercent = ref(readStoredOriginalRecognitionPercent())
-const useHighPrecisionSimilarity = ref(readStoredHighPrecisionSimilarity())
+const originalRecognitionThreshold = ref(readStoredOriginalRecognitionThreshold())
 const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
 const showEmptyOriginalRows = ref(false)
@@ -506,22 +520,24 @@ let unlistenGroupSimilarityProgress: UnlistenFn | null = null
 let groupSimilarityProgressListenerPromise: Promise<void> | null = null
 
 const group = computed(() => store.selectedGroup)
-const originalRecognitionThreshold = computed(() => originalRecognitionPercent.value / 100)
-
 const qualitySliderMarks = {
-  0: '80%',
-  18: '98%',
-  38: '99%',
-  138: '100%'
+  0: '0.80',
+  18: '0.98',
+  38: '0.99',
+  138: '1.00'
 }
 
 const originalRecognitionMarks = {
-  95: '宽松',
-  98: '标准',
-  100: '保守'
+  0: '0.95',
+  30: '0.98',
+  40: '0.99',
+  140: '1.00'
 }
 
 const qualitySliderValue = computed(() => thresholdToSliderValue(store.qualitySelectionThreshold))
+const originalRecognitionSliderValue = computed(() =>
+  precisionThresholdToSliderValue(originalRecognitionThreshold.value)
+)
 
 const groupKey = computed(() =>
   `${group.value?.group_index || ''}:${group.value?.members.map((member) => member.image_id).join(',') || ''}`
@@ -738,30 +754,30 @@ async function openFolder(member: ComparisonGroupMember) {
 
 function formatSimilarity(value?: number | null) {
   if (value === undefined || value === null) return '—'
-  return formatQualityPercent(value)
-}
-
-function formatQualityPercent(value: number) {
-  return `${(value * 100).toFixed(2)}%`
+  return formatSsim(value)
 }
 
 function formatQualitySliderTooltip(value: number) {
-  return formatQualityPercent(sliderValueToThreshold(value))
+  return formatSsimThreshold(qualitySliderValueToThreshold(value))
 }
 
-function formatPercentSliderTooltip(value: number) {
-  return `${value.toFixed(1)}%`
+function formatSsimThreshold(value: number) {
+  return value.toFixed(4)
+}
+
+function formatRecognitionSliderTooltip(value: number) {
+  return formatSsimThreshold(precisionSliderValueToThreshold(value))
 }
 
 function handleOriginalRecognitionInput(value: number | number[]) {
   const nextValue = Array.isArray(value) ? value[0] : value
-  originalRecognitionPercent.value = Math.min(100, Math.max(95, Math.round(nextValue * 10) / 10))
-  rememberOriginalRecognitionPercent(originalRecognitionPercent.value)
+  originalRecognitionThreshold.value = precisionSliderValueToThreshold(nextValue)
+  rememberOriginalRecognitionThreshold(originalRecognitionThreshold.value)
 }
 
 function handleQualityThresholdInput(value: number | number[]) {
   const nextValue = Array.isArray(value) ? value[0] : value
-  store.setQualitySelectionThreshold(sliderValueToThreshold(nextValue))
+  store.setQualitySelectionThreshold(qualitySliderValueToThreshold(nextValue))
   applyAutoQualitySelection()
 }
 
@@ -769,18 +785,8 @@ function handleQualityThresholdChange() {
   ElMessage.info('已按当前阈值更新勾选')
 }
 
-function sliderValueToThreshold(sliderValue: number) {
-  const tick = Math.min(138, Math.max(0, Math.round(sliderValue)))
-  if (tick <= 18) return (80 + tick) / 100
-  if (tick <= 38) return (98 + (tick - 18) * 0.05) / 100
-  return (99 + (tick - 38) * 0.01) / 100
-}
-
 function thresholdToSliderValue(threshold: number) {
-  const percent = Math.min(100, Math.max(80, threshold * 100))
-  if (percent <= 98) return Math.round(percent - 80)
-  if (percent <= 99) return 18 + Math.round((percent - 98) / 0.05)
-  return 38 + Math.round((percent - 99) / 0.01)
+  return qualityThresholdToSliderValue(threshold)
 }
 
 function formatFileSize(bytes: number) {
@@ -844,52 +850,15 @@ async function confirmRecycleSelected() {
   }
 }
 
-function readStoredOriginalRecognitionPercent() {
-  const rawValue = window.localStorage.getItem(ORIGINAL_RECOGNITION_PERCENT_KEY)
-  const parsedValue = rawValue ? Number(rawValue) : 98.5
-  if (!Number.isFinite(parsedValue)) return 98.5
-  return Math.min(100, Math.max(95, Math.round(parsedValue * 10) / 10))
+function readStoredOriginalRecognitionThreshold() {
+  return parseStoredRecognitionThreshold(
+    window.localStorage.getItem(ORIGINAL_RECOGNITION_THRESHOLD_KEY),
+    window.localStorage.getItem(LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY)
+  )
 }
 
-function rememberOriginalRecognitionPercent(value: number) {
-  window.localStorage.setItem(ORIGINAL_RECOGNITION_PERCENT_KEY, value.toString())
-}
-
-function readStoredHighPrecisionSimilarity() {
-  return window.localStorage.getItem(HIGH_PRECISION_SIMILARITY_KEY) === 'true'
-}
-
-function rememberHighPrecisionSimilarity(value: boolean) {
-  window.localStorage.setItem(HIGH_PRECISION_SIMILARITY_KEY, String(value))
-}
-
-async function handlePrecisionModeChange(value: string | number | boolean) {
-  const nextValue = Boolean(value)
-  if (nextValue === useHighPrecisionSimilarity.value) return
-
-  if (nextValue) {
-    try {
-      await ElMessageBox.confirm(
-        '标准结构相似性会使用更完整的窗口算法重新比对当前组，相似度判断更细，但会明显拉长等待时间。是否开启？',
-        '开启标准结构相似性对比',
-        {
-          confirmButtonText: '开启标准结构相似性',
-          cancelButtonText: '继续低精度',
-          type: 'warning'
-        }
-      )
-    } catch (error) {
-      if (error === 'cancel' || error === 'close') return
-      throw error
-    }
-  }
-
-  useHighPrecisionSimilarity.value = nextValue
-  rememberHighPrecisionSimilarity(nextValue)
-  groupSimilarityScoreCache.clear()
-  groupSimilarityScores.value = []
-  ElMessage.info(nextValue ? '已切换为标准结构相似性，将重新计算当前组' : '已切换为低精度，将重新计算当前组')
-  await loadGroupCrossCheckScores()
+function rememberOriginalRecognitionThreshold(value: number) {
+  window.localStorage.setItem(ORIGINAL_RECOGNITION_THRESHOLD_KEY, value.toFixed(4))
 }
 
 async function loadGroupCrossCheckScores() {
@@ -906,8 +875,7 @@ async function loadGroupCrossCheckScores() {
   }
   const scoreCacheKey = getGroupScoreCacheKey(
     store.currentRunId,
-    currentGroup.members,
-    useHighPrecisionSimilarity.value
+    currentGroup.members
   )
   const cachedScores = groupSimilarityScoreCache.get(scoreCacheKey)
   if (cachedScores) {
@@ -922,8 +890,7 @@ async function loadGroupCrossCheckScores() {
     const scores = await getGroupSimilarityScores(
       store.currentRunId,
       currentGroup.members.map((member) => member.image_id),
-      requestKey,
-      useHighPrecisionSimilarity.value
+      requestKey
     )
     if (requestId === crossCheckRequestId) {
       groupSimilarityScores.value = scores
@@ -941,7 +908,7 @@ async function loadGroupCrossCheckScores() {
   }
 }
 
-function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[], useHighPrecision: boolean) {
+function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[]) {
   const memberKeys = members
     .map((member) => [
       member.image_id,
@@ -953,7 +920,7 @@ function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[], 
     ].join('|'))
     .sort()
     .join(';')
-  return `${runId}:${useHighPrecision ? 'high' : 'fast'}:${memberKeys}`
+  return `${runId}:standard-ssim:${memberKeys}`
 }
 
 function rememberGroupSimilarityScores(cacheKey: string, scores: GroupSimilarityScore[]) {
@@ -1094,7 +1061,10 @@ function isAutoOriginal(member: ComparisonGroupMember, maxPixels: number, maxAsp
 function getAutoOriginalReason(member: ComparisonGroupMember, maxPixels: number) {
   if (group.value && member.image_id === group.value.representative_image_id) return '组内代表图'
   if (member.role === 'reference') return '系统参考图'
-  if (getPixels(member) >= maxPixels * 0.9) return '分辨率接近组内最大图'
+  if (getPixels(member) >= maxPixels * 0.9 && typeof member.ssim_score === 'number') {
+    return `分辨率和画面比例接近，且任务标准 SSIM ${formatSimilarity(member.ssim_score)} 达到原图拆分阈值 ${formatSsimThreshold(originalRecognitionThreshold.value)}`
+  }
+  if (getPixels(member) >= maxPixels * 0.9) return '分辨率和画面比例接近；任务未记录 SSIM，按原图候选保留'
   return '系统识别为原图'
 }
 
@@ -1105,9 +1075,9 @@ function buildThumbnailCandidate(
   const reference = findReferenceOriginal(member, originals)
   if (!reference) return null
 
-  const similarity = member.ssim_score
+  const storedSimilarity = getStoredSimilarityForReference(member, reference)
   const crossSimilarity = getCrossSimilarity(member.image_id, reference.image_id)
-  const activeSimilarity = crossSimilarity ?? similarity
+  const activeSimilarity = crossSimilarity ?? storedSimilarity
   const lowerResolution = getPixels(member) < getPixels(reference) * 0.9
   const smallerFile = member.file_size < reference.file_size * 0.75
   const manuallyDowngraded = manualThumbnailIds.value.includes(member.image_id)
@@ -1124,10 +1094,27 @@ function buildThumbnailCandidate(
       lowerResolution,
       smallerFile,
       manuallyDowngraded,
+      hasSimilarity: typeof activeSimilarity === 'number',
       similarEnough,
       hasCrossSimilarity: typeof crossSimilarity === 'number'
     })
   }
+}
+
+function getStoredSimilarityForReference(
+  member: ComparisonGroupMember,
+  reference: ComparisonGroupMember
+) {
+  if (typeof member.ssim_score !== 'number') return undefined
+  if (member.reference_image_id === reference.image_id) return member.ssim_score
+  if (
+    member.reference_image_id == null
+    && member.reference_relative_path
+    && member.reference_relative_path === reference.relative_path
+  ) {
+    return member.ssim_score
+  }
+  return undefined
 }
 
 function findReferenceOriginal(member: ComparisonGroupMember, originals: ComparisonGroupMember[]) {
@@ -1161,9 +1148,11 @@ function getCandidateReason(flags: {
   lowerResolution: boolean
   smallerFile: boolean
   manuallyDowngraded: boolean
+  hasSimilarity: boolean
   similarEnough: boolean
   hasCrossSimilarity: boolean
 }) {
+  if (!flags.hasSimilarity) return '缺少与当前原图的标准 SSIM，未自动勾选'
   if (!flags.similarEnough) return '未达到当前勾选阈值'
   if (flags.manuallyDowngraded) return '你手动设为缩略图'
   if (flags.hasCrossSimilarity && flags.lowerResolution && flags.smallerFile) return '交叉验证最相似，且分辨率和体积都更低'
@@ -1285,18 +1274,6 @@ function resetImageViewerZoom() {
   white-space: nowrap;
 }
 
-.precision-summary {
-  font-weight: 650;
-
-  &.is-high {
-    color: #f56c6c;
-  }
-
-  &.is-fast {
-    color: #67c23a;
-  }
-}
-
 .detail-actions {
   display: flex;
   align-items: center;
@@ -1376,6 +1353,20 @@ function resetImageViewerZoom() {
   color: #909399;
   font-size: 12px;
   line-height: 18px;
+}
+
+.column-header-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #606266;
+  cursor: help;
+
+  .el-icon {
+    color: #909399;
+    font-size: 14px;
+  }
 }
 
 .cross-check-loading {

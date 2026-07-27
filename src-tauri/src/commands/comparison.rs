@@ -1,4 +1,6 @@
-use crate::core::algorithm_profile::CURRENT_ALGORITHM_PROFILE_ID;
+use crate::core::algorithm_profile::{
+    algorithm_pool, ALGORITHM_WORKER_COUNT, CURRENT_ALGORITHM_PROFILE_ID,
+};
 use crate::db::models::{AnalysisType, ComparisonStats, RunStatus};
 use crate::db::repository::{Repository, RunConfig};
 use crate::error::{AppError, Result};
@@ -158,55 +160,58 @@ struct GroupSimilarityImageCacheJob {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct GroupSimilarityCacheKey {
     run_id: String,
-    left_image_id: i64,
-    right_image_id: i64,
-    use_high_precision: bool,
+    algorithm_profile_id: String,
+    left: SimilaritySourceFingerprint,
+    right: SimilaritySourceFingerprint,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct GroupSimilarityResultCacheKey {
     run_id: String,
-    use_high_precision: bool,
+    algorithm_profile_id: String,
     members: Vec<GroupSimilarityResultCacheMember>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct GroupSimilarityResultCacheMember {
-    image_id: i64,
-    file_path: String,
-    file_size: i64,
-    width: u32,
-    height: u32,
+    source: SimilaritySourceFingerprint,
     phash: Option<String>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct SimilaritySourceFingerprint {
+    image_id: i64,
+    canonical_file_path: String,
+    current_file_size: u64,
+    current_modified_ns: u128,
+    source_width: u32,
+    source_height: u32,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SimilarityImageCacheKey {
     run_id: String,
-    image_id: i64,
-    use_high_precision: bool,
-    file_path: String,
-    file_size: i64,
-    source_width: u32,
-    source_height: u32,
+    algorithm_profile_id: String,
+    source: SimilaritySourceFingerprint,
     target_width: u32,
     target_height: u32,
 }
 
 #[derive(Debug, Clone)]
 struct CachedSimilarityImage {
-    width: u32,
-    height: u32,
-    channels: u8,
-    pixels: Arc<Vec<u8>>,
+    gray: image::GrayImage,
 }
 
 #[derive(Debug, Clone)]
 struct ImageSummary {
     id: i64,
     file_path: String,
+    canonical_file_path: String,
     relative_path: String,
     file_size: i64,
+    file_modified_at: i64,
+    current_file_size: u64,
+    current_modified_ns: u128,
     width: u32,
     height: u32,
     phash: Option<String>,
@@ -226,9 +231,8 @@ const GROUP_SIMILARITY_ORIGINAL_PIXEL_RATIO: f64 = 0.9;
 const GROUP_SIMILARITY_ORIGINAL_FILE_RATIO: f64 = 0.75;
 const GROUP_SIMILARITY_LOWER_PIXEL_RATIO: f64 = 0.98;
 const GROUP_SIMILARITY_LOWER_FILE_RATIO: f64 = 0.98;
-const GROUP_SIMILARITY_MAX_SSIM_EDGE: u32 = 512;
 const GROUP_SIMILARITY_RESULT_CACHE_LIMIT: usize = 50;
-const GROUP_SIMILARITY_IMAGE_CACHE_LIMIT: usize = 512;
+const GROUP_SIMILARITY_IMAGE_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 
 static GROUP_SIMILARITY_CACHE: OnceLock<
     Mutex<HashMap<GroupSimilarityCacheKey, GroupSimilarityScore>>,
@@ -427,7 +431,7 @@ fn read_comparison_results(repo: &Repository, run_id: &str) -> Result<Vec<Compar
 
 fn read_completed_images(repo: &Repository, run_id: &str) -> Result<Vec<ImageSummary>> {
     let mut stmt = repo.conn().prepare(
-        r#"SELECT id, file_path, relative_path, file_size, width, height, phash
+        r#"SELECT id, file_path, relative_path, file_size, width, height, phash, file_modified_at
            FROM images
            WHERE run_id = ?1
              AND scan_status = 'completed'
@@ -449,11 +453,18 @@ fn read_completed_images(repo: &Repository, run_id: &str) -> Result<Vec<ImageSum
 
     let images = stmt
         .query_map([run_id], |row| {
+            let file_path: String = row.get(1)?;
+            let file_size: i64 = row.get(3)?;
+            let file_modified_at: i64 = row.get(7)?;
             Ok(ImageSummary {
                 id: row.get(0)?,
-                file_path: row.get(1)?,
+                canonical_file_path: file_path.clone(),
+                file_path,
                 relative_path: row.get(2)?,
-                file_size: row.get(3)?,
+                file_size,
+                file_modified_at,
+                current_file_size: file_size.max(0) as u64,
+                current_modified_ns: file_modified_at.max(0) as u128 * 1_000_000_000,
                 width: row.get(4)?,
                 height: row.get(5)?,
                 phash: row.get(6)?,
@@ -484,7 +495,7 @@ fn read_images_by_ids(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        r#"SELECT id, file_path, relative_path, file_size, width, height, phash
+        r#"SELECT id, file_path, relative_path, file_size, width, height, phash, file_modified_at
            FROM images
            WHERE run_id = ? AND scan_status = 'completed' AND id IN ({placeholders})
            ORDER BY relative_path, id"#
@@ -497,11 +508,18 @@ fn read_images_by_ids(
     let mut stmt = repo.conn().prepare(&sql)?;
     let images = stmt
         .query_map(rusqlite::params_from_iter(params), |row| {
+            let file_path: String = row.get(1)?;
+            let file_size: i64 = row.get(3)?;
+            let file_modified_at: i64 = row.get(7)?;
             Ok(ImageSummary {
                 id: row.get(0)?,
-                file_path: row.get(1)?,
+                canonical_file_path: file_path.clone(),
+                file_path,
                 relative_path: row.get(2)?,
-                file_size: row.get(3)?,
+                file_size,
+                file_modified_at,
+                current_file_size: file_size.max(0) as u64,
+                current_modified_ns: file_modified_at.max(0) as u128 * 1_000_000_000,
                 width: row.get(4)?,
                 height: row.get(5)?,
                 phash: row.get(6)?,
@@ -567,6 +585,83 @@ fn pixel_count(image: &ImageSummary) -> u64 {
 
 fn file_name_from_path(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+fn ensure_current_algorithm_profile(algorithm_profile_id: &str) -> Result<()> {
+    if algorithm_profile_id == CURRENT_ALGORITHM_PROFILE_ID {
+        return Ok(());
+    }
+
+    Err(AppError::ValidationError(format!(
+        "该历史任务使用旧算法配置 {algorithm_profile_id}，不能与当前标准 SSIM/pHash 数值混用，请重新运行任务"
+    )))
+}
+
+fn refresh_current_file_fingerprints(images: &mut [ImageSummary]) -> Result<()> {
+    for image in images {
+        let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
+            AppError::FileSystem(format!("无法读取图片 {}: {error}", image.relative_path))
+        })?;
+        let metadata = std::fs::metadata(&canonical)?;
+        if !metadata.is_file() {
+            return Err(AppError::ValidationError(format!(
+                "图片已不再是普通文件，请重新运行任务: {}",
+                image.relative_path
+            )));
+        }
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        let current_modified_secs = modified
+            .as_ref()
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default();
+
+        if metadata.len() != image.file_size.max(0) as u64
+            || current_modified_secs != image.file_modified_at
+        {
+            return Err(AppError::ValidationError(format!(
+                "图片在任务完成后已发生变化，请重新运行任务: {}",
+                image.relative_path
+            )));
+        }
+
+        image.canonical_file_path = canonical.to_string_lossy().into_owned();
+        image.current_file_size = metadata.len();
+        image.current_modified_ns = modified
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+    }
+
+    Ok(())
+}
+
+fn validate_current_file_fingerprints(images: &[ImageSummary]) -> Result<()> {
+    for image in images {
+        let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
+            AppError::FileSystem(format!("无法读取图片 {}: {error}", image.relative_path))
+        })?;
+        let metadata = std::fs::metadata(&canonical)?;
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+
+        if canonical.to_string_lossy() != image.canonical_file_path
+            || metadata.len() != image.current_file_size
+            || modified_ns != image.current_modified_ns
+        {
+            return Err(AppError::ValidationError(format!(
+                "图片在相似度计算期间已发生变化，请重试: {}",
+                image.relative_path
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn choose_group_reference<'a>(images: &'a [&ImageSummary]) -> &'a ImageSummary {
@@ -671,6 +766,7 @@ fn read_comparison_groups(
     let run = repo
         .get_run(run_id)?
         .ok_or_else(|| AppError::NotFound(format!("运行不存在: {}", run_id)))?;
+    ensure_current_algorithm_profile(&run.algorithm_profile_id)?;
     let active_grouping_distance = grouping_distance
         .unwrap_or(run.phash_max_distance)
         .clamp(0, 24);
@@ -777,39 +873,68 @@ fn group_similarity_image_cache(
     GROUP_SIMILARITY_IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn similarity_image_cache_bytes(
+    cache: &HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>,
+) -> usize {
+    cache.values().map(|image| image.gray.as_raw().len()).sum()
+}
+
+fn insert_similarity_image_cache_entry(
+    cache: &mut HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>,
+    cache_key: SimilarityImageCacheKey,
+    cached_image: Arc<CachedSimilarityImage>,
+    byte_budget: usize,
+) {
+    cache.insert(cache_key.clone(), cached_image);
+
+    while cache.len() > 1 && similarity_image_cache_bytes(cache) > byte_budget {
+        let Some(eviction_key) = cache.keys().find(|key| *key != &cache_key).cloned() else {
+            break;
+        };
+        cache.remove(&eviction_key);
+    }
+}
+
+fn similarity_source_fingerprint(image: &ImageSummary) -> SimilaritySourceFingerprint {
+    SimilaritySourceFingerprint {
+        image_id: image.id,
+        canonical_file_path: image.canonical_file_path.clone(),
+        current_file_size: image.current_file_size,
+        current_modified_ns: image.current_modified_ns,
+        source_width: image.width,
+        source_height: image.height,
+    }
+}
+
 fn group_similarity_cache_key(
     run_id: &str,
-    left_image_id: i64,
-    right_image_id: i64,
-    use_high_precision: bool,
+    left: &ImageSummary,
+    right: &ImageSummary,
 ) -> GroupSimilarityCacheKey {
-    let (left_image_id, right_image_id) = if left_image_id <= right_image_id {
-        (left_image_id, right_image_id)
+    let left = similarity_source_fingerprint(left);
+    let right = similarity_source_fingerprint(right);
+    let (left, right) = if left <= right {
+        (left, right)
     } else {
-        (right_image_id, left_image_id)
+        (right, left)
     };
 
     GroupSimilarityCacheKey {
         run_id: run_id.to_string(),
-        left_image_id,
-        right_image_id,
-        use_high_precision,
+        algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
+        left,
+        right,
     }
 }
 
 fn group_similarity_result_cache_key(
     run_id: &str,
     images: &[ImageSummary],
-    use_high_precision: bool,
 ) -> GroupSimilarityResultCacheKey {
     let mut members = images
         .iter()
         .map(|image| GroupSimilarityResultCacheMember {
-            image_id: image.id,
-            file_path: image.file_path.clone(),
-            file_size: image.file_size,
-            width: image.width,
-            height: image.height,
+            source: similarity_source_fingerprint(image),
             phash: image.phash.clone(),
         })
         .collect::<Vec<_>>();
@@ -817,7 +942,7 @@ fn group_similarity_result_cache_key(
 
     GroupSimilarityResultCacheKey {
         run_id: run_id.to_string(),
-        use_high_precision,
+        algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
         members,
     }
 }
@@ -827,16 +952,11 @@ fn similarity_image_cache_key(
     image: &ImageSummary,
     target_width: u32,
     target_height: u32,
-    use_high_precision: bool,
 ) -> SimilarityImageCacheKey {
     SimilarityImageCacheKey {
         run_id: run_id.to_string(),
-        image_id: image.id,
-        use_high_precision,
-        file_path: image.file_path.clone(),
-        file_size: image.file_size,
-        source_width: image.width,
-        source_height: image.height,
+        algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
+        source: similarity_source_fingerprint(image),
         target_width,
         target_height,
     }
@@ -1005,7 +1125,6 @@ fn build_group_similarity_image_cache_jobs(
     run_id: &str,
     images: &[ImageSummary],
     plan: &[GroupSimilarityPlanPair],
-    use_high_precision: bool,
 ) -> Vec<GroupSimilarityImageCacheJob> {
     use crate::core::ssim::compute::SsimComputer;
 
@@ -1015,28 +1134,14 @@ fn build_group_similarity_image_cache_jobs(
     for pair in plan {
         let left = &images[pair.left_index];
         let right = &images[pair.right_index];
-        let (large_index, small_index) =
-            if compare_image_quality(left, right) != std::cmp::Ordering::Less {
-                (pair.left_index, pair.right_index)
-            } else {
-                (pair.right_index, pair.left_index)
-            };
-        let small = &images[small_index];
-        let (target_width, target_height) = SsimComputer::target_dimensions(
-            small.width,
-            small.height,
-            GROUP_SIMILARITY_MAX_SSIM_EDGE,
+        let (target_width, target_height) = SsimComputer::pair_target_dimensions(
+            (left.width, left.height),
+            (right.width, right.height),
         );
 
-        for image_index in [large_index, small_index] {
+        for image_index in [pair.left_index, pair.right_index] {
             let image = &images[image_index];
-            let cache_key = similarity_image_cache_key(
-                run_id,
-                image,
-                target_width,
-                target_height,
-                use_high_precision,
-            );
+            let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
             if seen_keys.insert(cache_key) {
                 jobs.push(GroupSimilarityImageCacheJob {
                     image_index,
@@ -1055,15 +1160,8 @@ fn has_cached_similarity_image(
     image: &ImageSummary,
     target_width: u32,
     target_height: u32,
-    use_high_precision: bool,
 ) -> bool {
-    let cache_key = similarity_image_cache_key(
-        run_id,
-        image,
-        target_width,
-        target_height,
-        use_high_precision,
-    );
+    let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
     group_similarity_image_cache()
         .lock()
         .unwrap()
@@ -1075,17 +1173,10 @@ fn prepare_similarity_image(
     image: &ImageSummary,
     target_width: u32,
     target_height: u32,
-    use_high_precision: bool,
 ) -> Result<Arc<CachedSimilarityImage>> {
-    use crate::core::ssim::resize::ImageResizer;
+    use crate::core::ssim::compute::SsimComputer;
 
-    let cache_key = similarity_image_cache_key(
-        run_id,
-        image,
-        target_width,
-        target_height,
-        use_high_precision,
-    );
+    let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
     if let Some(cached_image) = group_similarity_image_cache()
         .lock()
         .unwrap()
@@ -1096,37 +1187,16 @@ fn prepare_similarity_image(
     }
 
     let source_image = image::open(Path::new(&image.file_path))?;
-    let resized_image =
-        if source_image.width() == target_width && source_image.height() == target_height {
-            source_image
-        } else {
-            ImageResizer::resize_to_target(&source_image, target_width, target_height)?
-        };
-    let cached_image = if use_high_precision {
-        let rgb_image = resized_image.to_rgb8();
-        Arc::new(CachedSimilarityImage {
-            width: rgb_image.width(),
-            height: rgb_image.height(),
-            channels: 3,
-            pixels: Arc::new(rgb_image.into_raw()),
-        })
-    } else {
-        let gray_image = resized_image.to_luma8();
-        Arc::new(CachedSimilarityImage {
-            width: gray_image.width(),
-            height: gray_image.height(),
-            channels: 1,
-            pixels: Arc::new(gray_image.into_raw()),
-        })
-    };
+    let gray_image = SsimComputer::prepare_image(&source_image, target_width, target_height)?;
+    let cached_image = Arc::new(CachedSimilarityImage { gray: gray_image });
 
     let mut cache = group_similarity_image_cache().lock().unwrap();
-    cache.insert(cache_key.clone(), Arc::clone(&cached_image));
-    if cache.len() > GROUP_SIMILARITY_IMAGE_CACHE_LIMIT {
-        if let Some(oldest_key) = cache.keys().find(|key| *key != &cache_key).cloned() {
-            cache.remove(&oldest_key);
-        }
-    }
+    insert_similarity_image_cache_entry(
+        &mut cache,
+        cache_key,
+        Arc::clone(&cached_image),
+        GROUP_SIMILARITY_IMAGE_CACHE_BYTE_BUDGET,
+    );
 
     Ok(cached_image)
 }
@@ -1134,91 +1204,34 @@ fn prepare_similarity_image(
 fn compute_similarity_from_cached_images(
     left: &CachedSimilarityImage,
     right: &CachedSimilarityImage,
-    use_high_precision: bool,
 ) -> Result<f64> {
-    if left.width != right.width || left.height != right.height || left.channels != right.channels {
+    if left.gray.dimensions() != right.gray.dimensions() {
         return Err(AppError::SsimComputation("图片尺寸不匹配".to_string()));
     }
 
-    if use_high_precision {
-        use crate::core::ssim::standard::StandardSsim;
+    use crate::core::ssim::compute::SsimComputer;
 
-        return StandardSsim::compute_owned(
-            cached_similarity_image_to_dynamic_image(left)?,
-            cached_similarity_image_to_dynamic_image(right)?,
-        );
-    }
-
-    let mut sum_diff_sq = 0.0;
-    for (left_pixel, right_pixel) in left.pixels.iter().zip(right.pixels.iter()) {
-        let diff = (*left_pixel as f64) - (*right_pixel as f64);
-        sum_diff_sq += diff * diff;
-    }
-
-    let pixel_count = left.pixels.len() as f64;
-    if pixel_count == 0.0 {
-        return Err(AppError::SsimComputation("图片像素为空".to_string()));
-    }
-
-    let mse = sum_diff_sq / pixel_count;
-    let max_value = 255.0 * 255.0;
-    Ok(1.0 - (mse / max_value).min(1.0))
-}
-
-fn cached_similarity_image_to_dynamic_image(
-    image: &CachedSimilarityImage,
-) -> Result<image::DynamicImage> {
-    match image.channels {
-        1 => image::GrayImage::from_raw(image.width, image.height, (*image.pixels).clone())
-            .map(image::DynamicImage::ImageLuma8)
-            .ok_or_else(|| AppError::SsimComputation("图片像素不完整".to_string())),
-        3 => image::RgbImage::from_raw(image.width, image.height, (*image.pixels).clone())
-            .map(image::DynamicImage::ImageRgb8)
-            .ok_or_else(|| AppError::SsimComputation("图片像素不完整".to_string())),
-        channels => Err(AppError::SsimComputation(format!(
-            "不支持的图片通道数: {channels}"
-        ))),
-    }
+    SsimComputer::compute_gray(&left.gray, &right.gray)
 }
 
 fn compute_group_similarity_pair(
     run_id: &str,
     left: &ImageSummary,
     right: &ImageSummary,
-    use_high_precision: bool,
 ) -> GroupSimilarityScore {
     use crate::core::ssim::compute::SsimComputer;
 
-    let (large, small) = if compare_image_quality(left, right) != std::cmp::Ordering::Less {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    let (target_width, target_height) =
-        SsimComputer::target_dimensions(small.width, small.height, GROUP_SIMILARITY_MAX_SSIM_EDGE);
+    let (target_width, target_height) = SsimComputer::pair_target_dimensions(
+        (left.width, left.height),
+        (right.width, right.height),
+    );
 
     match (
-        prepare_similarity_image(
-            run_id,
-            large,
-            target_width,
-            target_height,
-            use_high_precision,
-        ),
-        prepare_similarity_image(
-            run_id,
-            small,
-            target_width,
-            target_height,
-            use_high_precision,
-        ),
+        prepare_similarity_image(run_id, left, target_width, target_height),
+        prepare_similarity_image(run_id, right, target_width, target_height),
     ) {
         (Ok(large_image), Ok(small_image)) => {
-            match compute_similarity_from_cached_images(
-                &large_image,
-                &small_image,
-                use_high_precision,
-            ) {
+            match compute_similarity_from_cached_images(&large_image, &small_image) {
                 Ok(ssim_score) => GroupSimilarityScore {
                     left_image_id: left.id,
                     right_image_id: right.id,
@@ -1246,14 +1259,16 @@ fn compute_group_similarity_scores(
     run_id: &str,
     images: &[ImageSummary],
     request_id: &str,
-    use_high_precision: bool,
     window: Option<&Window>,
-) -> Vec<GroupSimilarityScore> {
+) -> Result<Vec<GroupSimilarityScore>> {
+    let mut current_images = images.to_vec();
+    refresh_current_file_fingerprints(&mut current_images)?;
+    let images = current_images.as_slice();
     let full_pair_count = images.len().saturating_mul(images.len().saturating_sub(1)) / 2;
     let plan = build_group_similarity_plan(images);
     let total_pairs = plan.len();
     let skipped_pairs = full_pair_count.saturating_sub(total_pairs);
-    let result_cache_key = group_similarity_result_cache_key(run_id, images, use_high_precision);
+    let result_cache_key = group_similarity_result_cache_key(run_id, images);
 
     if let Some(window) = window {
         emit_group_similarity_progress(
@@ -1304,14 +1319,11 @@ fn compute_group_similarity_scores(
                 ),
             );
         }
-        return cached_scores;
+        return Ok(cached_scores);
     }
 
-    let image_cache_jobs =
-        build_group_similarity_image_cache_jobs(run_id, images, &plan, use_high_precision);
+    let image_cache_jobs = build_group_similarity_image_cache_jobs(run_id, images, &plan);
     let total_cache_images = image_cache_jobs.len();
-    let mut processed_cache_images = 0;
-    let mut image_cache_hits = 0;
 
     if let Some(window) = window {
         emit_group_similarity_progress(
@@ -1335,93 +1347,117 @@ fn compute_group_similarity_scores(
         );
     }
 
-    for job in &image_cache_jobs {
-        let image = &images[job.image_index];
-        let was_cached = has_cached_similarity_image(
-            run_id,
-            image,
-            job.target_width,
-            job.target_height,
-            use_high_precision,
-        );
-        if let Some(window) = window {
-            emit_group_similarity_progress(
-                window,
-                group_similarity_progress(
-                    request_id,
-                    "running",
-                    "caching",
-                    total_pairs,
-                    0,
-                    total_cache_images,
-                    processed_cache_images,
-                    None,
-                    None,
-                    Some(image),
-                    0,
-                    image_cache_hits,
-                    0,
-                    skipped_pairs,
-                ),
-            );
-        }
-
-        let _ = prepare_similarity_image(
-            run_id,
-            image,
-            job.target_width,
-            job.target_height,
-            use_high_precision,
-        );
-        processed_cache_images += 1;
-        if was_cached {
-            image_cache_hits += 1;
-        }
-
-        if let Some(window) = window {
-            emit_group_similarity_progress(
-                window,
-                group_similarity_progress(
-                    request_id,
-                    "running",
-                    "caching",
-                    total_pairs,
-                    0,
-                    total_cache_images,
-                    processed_cache_images,
-                    None,
-                    None,
-                    Some(image),
-                    0,
-                    image_cache_hits,
-                    0,
-                    skipped_pairs,
-                ),
-            );
-        }
-    }
+    let processed_cache_images = AtomicUsize::new(0);
+    let image_cache_hits = AtomicUsize::new(0);
+    algorithm_pool().install(|| {
+        image_cache_jobs.par_iter().for_each(|job| {
+            let image = &images[job.image_index];
+            let was_cached =
+                has_cached_similarity_image(run_id, image, job.target_width, job.target_height);
+            let _ = prepare_similarity_image(run_id, image, job.target_width, job.target_height);
+            let processed = processed_cache_images.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            let hits = if was_cached {
+                image_cache_hits.fetch_add(1, AtomicOrdering::SeqCst) + 1
+            } else {
+                image_cache_hits.load(AtomicOrdering::SeqCst)
+            };
+            if let Some(window) = window {
+                emit_group_similarity_progress(
+                    window,
+                    group_similarity_progress(
+                        request_id,
+                        "running",
+                        "caching",
+                        total_pairs,
+                        0,
+                        total_cache_images,
+                        processed,
+                        None,
+                        None,
+                        Some(image),
+                        0,
+                        hits,
+                        0,
+                        skipped_pairs,
+                    ),
+                );
+            }
+        });
+    });
+    let processed_cache_images = processed_cache_images.load(AtomicOrdering::SeqCst);
+    let image_cache_hits = image_cache_hits.load(AtomicOrdering::SeqCst);
 
     let processed_pairs = AtomicUsize::new(0);
     let cache_hits = AtomicUsize::new(0);
     let computed_pairs = AtomicUsize::new(0);
     let progress_window = window.cloned();
 
-    let scores = plan
-        .par_iter()
-        .map(|pair| {
-            let left = &images[pair.left_index];
-            let right = &images[pair.right_index];
-            let cache_key =
-                group_similarity_cache_key(run_id, left.id, right.id, use_high_precision);
+    let scores = algorithm_pool().install(|| {
+        plan.par_iter()
+            .map(|pair| {
+                let left = &images[pair.left_index];
+                let right = &images[pair.right_index];
+                let cache_key = group_similarity_cache_key(run_id, left, right);
 
-            if let Some(cached_score) = group_similarity_cache()
-                .lock()
-                .unwrap()
-                .get(&cache_key)
-                .cloned()
-            {
+                if let Some(cached_score) = group_similarity_cache()
+                    .lock()
+                    .unwrap()
+                    .get(&cache_key)
+                    .cloned()
+                {
+                    let processed = processed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    let hits = cache_hits.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    if let Some(window) = &progress_window {
+                        emit_group_similarity_progress(
+                            window,
+                            group_similarity_progress(
+                                request_id,
+                                "running",
+                                "comparing",
+                                total_pairs,
+                                processed,
+                                total_cache_images,
+                                processed_cache_images,
+                                Some(left),
+                                Some(right),
+                                None,
+                                hits,
+                                image_cache_hits,
+                                computed_pairs.load(AtomicOrdering::SeqCst),
+                                skipped_pairs,
+                            ),
+                        );
+                    }
+                    return cached_score;
+                }
+
+                if let Some(window) = &progress_window {
+                    emit_group_similarity_progress(
+                        window,
+                        group_similarity_progress(
+                            request_id,
+                            "running",
+                            "comparing",
+                            total_pairs,
+                            processed_pairs.load(AtomicOrdering::SeqCst),
+                            total_cache_images,
+                            processed_cache_images,
+                            Some(left),
+                            Some(right),
+                            None,
+                            cache_hits.load(AtomicOrdering::SeqCst),
+                            image_cache_hits,
+                            computed_pairs.load(AtomicOrdering::SeqCst),
+                            skipped_pairs,
+                        ),
+                    );
+                }
+
+                let score = compute_group_similarity_pair(run_id, left, right);
+
                 let processed = processed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-                let hits = cache_hits.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                let computed = computed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+
                 if let Some(window) = &progress_window {
                     emit_group_similarity_progress(
                         window,
@@ -1436,73 +1472,31 @@ fn compute_group_similarity_scores(
                             Some(left),
                             Some(right),
                             None,
-                            hits,
+                            cache_hits.load(AtomicOrdering::SeqCst),
                             image_cache_hits,
-                            computed_pairs.load(AtomicOrdering::SeqCst),
+                            computed,
                             skipped_pairs,
                         ),
                     );
                 }
-                return cached_score;
-            }
 
-            if let Some(window) = &progress_window {
-                emit_group_similarity_progress(
-                    window,
-                    group_similarity_progress(
-                        request_id,
-                        "running",
-                        "comparing",
-                        total_pairs,
-                        processed_pairs.load(AtomicOrdering::SeqCst),
-                        total_cache_images,
-                        processed_cache_images,
-                        Some(left),
-                        Some(right),
-                        None,
-                        cache_hits.load(AtomicOrdering::SeqCst),
-                        image_cache_hits,
-                        computed_pairs.load(AtomicOrdering::SeqCst),
-                        skipped_pairs,
-                    ),
-                );
-            }
+                score
+            })
+            .collect::<Vec<_>>()
+    });
 
-            let score = compute_group_similarity_pair(run_id, left, right, use_high_precision);
-
-            group_similarity_cache()
-                .lock()
-                .unwrap()
-                .insert(cache_key, score.clone());
-
-            let processed = processed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-            let computed = computed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-
-            if let Some(window) = &progress_window {
-                emit_group_similarity_progress(
-                    window,
-                    group_similarity_progress(
-                        request_id,
-                        "running",
-                        "comparing",
-                        total_pairs,
-                        processed,
-                        total_cache_images,
-                        processed_cache_images,
-                        Some(left),
-                        Some(right),
-                        None,
-                        cache_hits.load(AtomicOrdering::SeqCst),
-                        image_cache_hits,
-                        computed,
-                        skipped_pairs,
-                    ),
-                );
-            }
-
-            score
-        })
-        .collect::<Vec<_>>();
+    validate_current_file_fingerprints(images)?;
+    {
+        let mut pair_cache = group_similarity_cache().lock().unwrap();
+        for (pair, score) in plan.iter().zip(&scores) {
+            let left = &images[pair.left_index];
+            let right = &images[pair.right_index];
+            pair_cache.insert(
+                group_similarity_cache_key(run_id, left, right),
+                score.clone(),
+            );
+        }
+    }
 
     let mut result_cache = group_similarity_result_cache().lock().unwrap();
     result_cache.insert(result_cache_key.clone(), scores.clone());
@@ -1538,7 +1532,7 @@ fn compute_group_similarity_scores(
         );
     }
 
-    scores
+    Ok(scores)
 }
 
 fn compare_image_quality(left: &ImageSummary, right: &ImageSummary) -> std::cmp::Ordering {
@@ -1546,6 +1540,31 @@ fn compare_image_quality(left: &ImageSummary, right: &ImageSummary) -> std::cmp:
         .cmp(&pixel_count(right))
         .then(left.file_size.cmp(&right.file_size))
         .then(right.relative_path.cmp(&left.relative_path))
+}
+
+fn run_config_from_settings(settings: &crate::db::models::Settings) -> RunConfig {
+    RunConfig {
+        phash_max_distance: settings.default_phash_max_distance,
+        compressed_ssim_threshold: settings.default_compressed_ssim_threshold,
+        variant_review_lower_bound: settings.default_variant_review_lower_bound,
+        aspect_ratio_tolerance: settings.default_aspect_ratio_tolerance,
+        primary_match_tie_threshold: 0.001,
+        supported_formats: vec![
+            "jpg".to_string(),
+            "jpeg".to_string(),
+            "png".to_string(),
+            "gif".to_string(),
+            "bmp".to_string(),
+            "webp".to_string(),
+        ],
+        follow_symlinks: false,
+        exclude_patterns: Some(vec![
+            ".recycle".to_string(),
+            ".git".to_string(),
+            "node_modules".to_string(),
+        ]),
+        max_workers: ALGORITHM_WORKER_COUNT as i32,
+    }
 }
 
 /// 开始多文件夹对比扫描
@@ -1587,28 +1606,10 @@ pub async fn start_multi_compare(
         .iter()
         .any(|path| path == &request.baseline_path);
 
-    // 默认配置（符合 IMAGE_COMPARISON_WORKFLOW.md 规范）
-    let config = RunConfig {
-        phash_max_distance: 10,
-        compressed_ssim_threshold: 0.995,
-        variant_review_lower_bound: 0.75,
-        aspect_ratio_tolerance: 0.005,
-        primary_match_tie_threshold: 0.001,
-        supported_formats: vec![
-            "jpg".to_string(),
-            "jpeg".to_string(),
-            "png".to_string(),
-            "gif".to_string(),
-            "bmp".to_string(),
-            "webp".to_string(),
-        ],
-        follow_symlinks: false,
-        exclude_patterns: Some(vec![
-            ".recycle".to_string(),
-            ".git".to_string(),
-            "node_modules".to_string(),
-        ]),
-        max_workers: num_cpus::get() as i32,
+    // 新任务保存完整配置快照，后续设置变化不影响历史结果。
+    let config = {
+        let repo_lock = repo.lock().unwrap();
+        run_config_from_settings(&repo_lock.load_settings()?)
     };
 
     // 3. 创建运行记录
@@ -1698,6 +1699,10 @@ pub async fn get_comparison_results(
     repo: State<'_, Arc<Mutex<Repository>>>,
 ) -> Result<Vec<ComparisonResultRow>> {
     let repo_lock = repo.lock().unwrap();
+    let run = repo_lock
+        .get_run(&run_id)?
+        .ok_or_else(|| AppError::NotFound(format!("运行不存在: {}", run_id)))?;
+    ensure_current_algorithm_profile(&run.algorithm_profile_id)?;
     read_comparison_results(&repo_lock, &run_id)
 }
 
@@ -1718,22 +1723,23 @@ pub async fn get_group_similarity_scores(
     run_id: String,
     image_ids: Vec<i64>,
     request_id: String,
-    use_high_precision: Option<bool>,
     window: Window,
     repo: State<'_, Arc<Mutex<Repository>>>,
 ) -> Result<Vec<GroupSimilarityScore>> {
     let images = {
         let repo_lock = repo.lock().unwrap();
+        let run = repo_lock
+            .get_run(&run_id)?
+            .ok_or_else(|| AppError::NotFound(format!("运行不存在: {}", run_id)))?;
+        ensure_current_algorithm_profile(&run.algorithm_profile_id)?;
         read_images_by_ids(&repo_lock, &run_id, &image_ids)?
     };
 
-    Ok(compute_group_similarity_scores(
-        &run_id,
-        &images,
-        &request_id,
-        use_high_precision.unwrap_or(false),
-        Some(&window),
-    ))
+    tauri::async_runtime::spawn_blocking(move || {
+        compute_group_similarity_scores(&run_id, &images, &request_id, Some(&window))
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("组内 SSIM 任务执行失败: {error}")))?
 }
 
 /// 获取运行状态
@@ -1772,10 +1778,10 @@ mod tests {
     use crate::core::phash::PHASH_ALGORITHM_VERSION;
     use crate::core::ssim::standard::StandardSsim;
     use crate::db::{repository::RunConfig, schema};
-    use image::{DynamicImage, RgbImage};
+    use image::{DynamicImage, GrayImage, Luma};
     use rusqlite::Connection;
 
-    fn create_test_repo() -> Repository {
+    fn create_test_repo_with_profile(algorithm_profile_id: &str) -> Repository {
         let conn = Connection::open_in_memory().unwrap();
         schema::initialize_database(&conn).unwrap();
         let repo = Repository::new(conn);
@@ -1783,7 +1789,7 @@ mod tests {
         repo.create_run(
             "run-1",
             "0.1.0",
-            "test-profile",
+            algorithm_profile_id,
             "D:/baseline",
             "A",
             &["D:/comparison".to_string()],
@@ -1793,6 +1799,22 @@ mod tests {
         .unwrap();
 
         repo
+    }
+
+    fn create_test_repo() -> Repository {
+        create_test_repo_with_profile(CURRENT_ALGORITHM_PROFILE_ID)
+    }
+
+    #[test]
+    fn comparison_groups_reject_legacy_algorithm_profiles() {
+        let repo = create_test_repo_with_profile("imagekeeper-v2-mse-ssim-512");
+
+        let error = read_comparison_groups(&repo, "run-1", None).unwrap_err();
+
+        assert!(
+            error.to_string().contains("旧算法") && error.to_string().contains("重新运行"),
+            "旧任务不能把历史 pHash/SSIM 当作当前标准值使用: {error}"
+        );
     }
 
     #[test]
@@ -2205,11 +2227,16 @@ mod tests {
         file_size: i64,
         phash: &str,
     ) -> ImageSummary {
+        let file_path = format!("D:/images/{relative_path}");
         ImageSummary {
             id,
-            file_path: format!("D:/images/{relative_path}"),
+            canonical_file_path: file_path.clone(),
+            file_path,
             relative_path: relative_path.to_string(),
             file_size,
+            file_modified_at: 0,
+            current_file_size: file_size.max(0) as u64,
+            current_modified_ns: 0,
             width,
             height,
             phash: Some(phash.to_string()),
@@ -2303,9 +2330,112 @@ mod tests {
         ];
 
         assert_eq!(
-            group_similarity_result_cache_key("run-1", &first_order, false),
-            group_similarity_result_cache_key("run-1", &second_order, false)
+            group_similarity_result_cache_key("run-1", &first_order),
+            group_similarity_result_cache_key("run-1", &second_order)
         );
+    }
+
+    #[test]
+    fn all_similarity_cache_layers_change_with_the_current_file_fingerprint() {
+        let left = image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001");
+        let right = image_summary_for_plan(2, "b.png", 1000, 667, 300_000, "0000000000000002");
+        let first_pair_key = group_similarity_cache_key("run-1", &left, &right);
+        let first_result_key =
+            group_similarity_result_cache_key("run-1", &[left.clone(), right.clone()]);
+        let first_image_key = similarity_image_cache_key("run-1", &left, 1000, 667);
+
+        let mut changed_left = left.clone();
+        changed_left.current_modified_ns = left.current_modified_ns.saturating_add(1);
+        let second_pair_key = group_similarity_cache_key("run-1", &changed_left, &right);
+        let second_result_key =
+            group_similarity_result_cache_key("run-1", &[changed_left.clone(), right]);
+        let second_image_key = similarity_image_cache_key("run-1", &changed_left, 1000, 667);
+
+        assert_ne!(first_pair_key, second_pair_key);
+        assert_ne!(first_result_key, second_result_key);
+        assert_ne!(first_image_key, second_image_key);
+    }
+
+    #[test]
+    fn group_similarity_rejects_a_file_changed_after_the_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("changed.png");
+        std::fs::write(&path, b"before").unwrap();
+        let original_metadata = std::fs::metadata(&path).unwrap();
+        let original_modified_at = original_metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut image = image_summary_for_plan(
+            1,
+            "changed.png",
+            1,
+            1,
+            original_metadata.len() as i64,
+            "0000000000000001",
+        );
+        image.file_path = path.to_string_lossy().into_owned();
+        image.canonical_file_path = image.file_path.clone();
+        image.file_modified_at = original_modified_at;
+
+        std::fs::write(&path, b"after-with-a-different-size").unwrap();
+        let error =
+            refresh_current_file_fingerprints(std::slice::from_mut(&mut image)).unwrap_err();
+
+        assert!(error.to_string().contains("重新运行任务"));
+    }
+
+    #[test]
+    fn current_file_fingerprint_validation_rejects_late_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("changed-during-comparison.png");
+        std::fs::write(&path, b"before").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let modified_at = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut image = image_summary_for_plan(
+            1,
+            "changed-during-comparison.png",
+            10,
+            10,
+            metadata.len() as i64,
+            "0000000000000001",
+        );
+        image.file_path = path.to_string_lossy().into_owned();
+        image.canonical_file_path = image.file_path.clone();
+        image.file_modified_at = modified_at;
+        refresh_current_file_fingerprints(std::slice::from_mut(&mut image)).unwrap();
+
+        std::fs::write(&path, b"after-with-a-different-size").unwrap();
+
+        let error = validate_current_file_fingerprints(std::slice::from_ref(&image)).unwrap_err();
+        assert!(error.to_string().contains("计算期间已发生变化"));
+    }
+
+    #[test]
+    fn saved_settings_are_snapshotted_into_new_run_config() {
+        let settings = crate::db::models::Settings {
+            default_compressed_ssim_threshold: 0.9825,
+            default_variant_review_lower_bound: 0.72,
+            default_phash_max_distance: 8,
+            default_aspect_ratio_tolerance: 0.004,
+            auto_preselect_exact_duplicates: false,
+            max_candidate_per_image: 50,
+        };
+
+        let config = run_config_from_settings(&settings);
+
+        assert_eq!(config.compressed_ssim_threshold, 0.9825);
+        assert_eq!(config.variant_review_lower_bound, 0.72);
+        assert_eq!(config.phash_max_distance, 8);
+        assert_eq!(config.aspect_ratio_tolerance, 0.004);
+        assert_eq!(config.max_workers, ALGORITHM_WORKER_COUNT as i32);
     }
 
     #[test]
@@ -2313,55 +2443,95 @@ mod tests {
         let image = image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001");
 
         assert_ne!(
-            similarity_image_cache_key("run-1", &image, 512, 341, false),
-            similarity_image_cache_key("run-1", &image, 256, 171, false)
+            similarity_image_cache_key("run-1", &image, 512, 341),
+            similarity_image_cache_key("run-1", &image, 256, 171)
         );
     }
 
     #[test]
-    fn similarity_cache_keys_include_precision_mode() {
-        let image = image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001");
-        let images = vec![image.clone()];
+    fn similarity_image_cache_is_bounded_by_gray_pixel_bytes() {
+        let first_key = similarity_image_cache_key(
+            "run-1",
+            &image_summary_for_plan(1, "a.png", 3, 2, 6, "0000000000000001"),
+            3,
+            2,
+        );
+        let second_key = similarity_image_cache_key(
+            "run-1",
+            &image_summary_for_plan(2, "b.png", 3, 2, 6, "0000000000000002"),
+            3,
+            2,
+        );
+        let mut cache = HashMap::new();
+        let first = Arc::new(CachedSimilarityImage {
+            gray: GrayImage::from_pixel(3, 2, Luma([10])),
+        });
+        let second = Arc::new(CachedSimilarityImage {
+            gray: GrayImage::from_pixel(3, 2, Luma([20])),
+        });
 
-        assert_ne!(
-            group_similarity_cache_key("run-1", 1, 2, false),
-            group_similarity_cache_key("run-1", 1, 2, true)
-        );
-        assert_ne!(
-            group_similarity_result_cache_key("run-1", &images, false),
-            group_similarity_result_cache_key("run-1", &images, true)
-        );
-        assert_ne!(
-            similarity_image_cache_key("run-1", &image, 512, 341, false),
-            similarity_image_cache_key("run-1", &image, 512, 341, true)
-        );
+        insert_similarity_image_cache_entry(&mut cache, first_key.clone(), first, 10);
+        insert_similarity_image_cache_entry(&mut cache, second_key.clone(), second, 10);
+
+        assert!(!cache.contains_key(&first_key));
+        assert!(cache.contains_key(&second_key));
+        assert!(similarity_image_cache_bytes(&cache) <= 10);
     }
 
     #[test]
-    fn high_precision_similarity_matches_standard_similarity_algorithm() {
+    fn group_similarity_matches_standard_similarity_algorithm() {
         let red = CachedSimilarityImage {
-            width: 2,
-            height: 1,
-            channels: 3,
-            pixels: Arc::new(vec![255, 0, 0, 255, 0, 0]),
+            gray: GrayImage::from_raw(2, 1, vec![76, 76]).unwrap(),
         };
         let green = CachedSimilarityImage {
-            width: 2,
-            height: 1,
-            channels: 3,
-            pixels: Arc::new(vec![0, 255, 0, 0, 255, 0]),
+            gray: GrayImage::from_raw(2, 1, vec![150, 150]).unwrap(),
         };
-        let red_image =
-            DynamicImage::ImageRgb8(RgbImage::from_raw(2, 1, (*red.pixels).clone()).unwrap());
-        let green_image =
-            DynamicImage::ImageRgb8(RgbImage::from_raw(2, 1, (*green.pixels).clone()).unwrap());
+        let red_image = DynamicImage::ImageLuma8(red.gray.clone());
+        let green_image = DynamicImage::ImageLuma8(green.gray.clone());
         let expected = StandardSsim::compute_owned(red_image, green_image).unwrap();
 
-        let score = compute_similarity_from_cached_images(&red, &green, true).unwrap();
+        let score = compute_similarity_from_cached_images(&red, &green).unwrap();
 
         assert!(
             (score - expected).abs() < 1e-12,
             "组内标准结构相似性应该复用统一算法，实际 {score}，期望 {expected}"
         );
+    }
+
+    #[test]
+    fn cached_group_similarity_matches_the_standard_similarity_algorithm() {
+        let left = CachedSimilarityImage {
+            gray: GrayImage::from_raw(3, 2, vec![0, 32, 64, 96, 128, 160]).unwrap(),
+        };
+        let right = CachedSimilarityImage {
+            gray: GrayImage::from_raw(3, 2, vec![12, 40, 70, 90, 140, 180]).unwrap(),
+        };
+        let expected = StandardSsim::compute_owned(
+            DynamicImage::ImageLuma8(left.gray.clone()),
+            DynamicImage::ImageLuma8(right.gray.clone()),
+        )
+        .unwrap();
+
+        let score = compute_similarity_from_cached_images(&left, &right).unwrap();
+
+        assert!((score - expected).abs() < 1e-12, "{score} != {expected}");
+    }
+
+    #[test]
+    fn group_similarity_uses_the_smaller_images_full_resolution() {
+        let images = vec![
+            image_summary_for_plan(1, "large.png", 4000, 3000, 4_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "small.png", 1600, 1200, 1_000_000, "0000000000000002"),
+        ];
+        let plan = vec![GroupSimilarityPlanPair {
+            left_index: 0,
+            right_index: 1,
+        }];
+
+        let jobs = build_group_similarity_image_cache_jobs("run-1", &images, &plan);
+
+        assert!(jobs
+            .iter()
+            .all(|job| { job.target_width == 1600 && job.target_height == 1200 }));
     }
 }

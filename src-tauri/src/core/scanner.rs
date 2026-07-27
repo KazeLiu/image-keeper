@@ -1,9 +1,12 @@
-use crate::core::image_features::extract_image_features;
+use crate::core::algorithm_profile::algorithm_pool;
+use crate::core::image_features::{extract_image_features, ImageFeatures};
 use crate::core::phash::PHASH_ALGORITHM_VERSION;
 use crate::db::models::FolderRole;
 use crate::db::repository::Repository;
 use crate::error::{AppError, Result};
+use rayon::prelude::*;
 use std::path::Path;
+use std::sync::mpsc::sync_channel;
 use walkdir::WalkDir;
 
 /// 进度回调函数类型
@@ -36,49 +39,42 @@ impl ScanEngine {
     where
         F: Fn(usize, usize) + Send,
     {
-        // 方案 A: 先统计文件数量
-        let total_files = self.count_files(root_path)?;
+        let files = self.collect_files(root_path)?;
+        let total_files = files.len();
         let mut processed_files = 0;
         let mut image_ids = Vec::new();
+        let (result_tx, result_rx) = sync_channel(algorithm_pool().current_num_threads().max(1));
+        algorithm_pool().spawn(move || {
+            files.par_iter().for_each_with(result_tx, |sender, path| {
+                let _ = sender.send((path.clone(), extract_image_features(path)));
+            });
+        });
 
-        for entry in WalkDir::new(root_path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| self.should_include(e.path()))
-        {
-            let entry = entry.map_err(|e| AppError::FileSystem(format!("遍历目录失败: {}", e)))?;
-
-            if !entry.file_type().is_file() {
-                continue;
+        for (path, result) in result_rx {
+            match result.and_then(|features| {
+                self.persist_features(
+                    repository,
+                    run_id,
+                    folder_id,
+                    root_path,
+                    &path,
+                    role.clone(),
+                    features,
+                )
+            }) {
+                Ok(image_id) => image_ids.push(image_id),
+                Err(error) => eprintln!("扫描文件失败 {:?}: {}", path, error),
             }
 
-            let path = entry.path();
-            if !self.is_supported_format(path) {
-                continue;
-            }
-
-            // 扫描单个文件
-            match self.scan_file(repository, run_id, folder_id, root_path, path, role.clone()) {
-                Ok(image_id) => {
-                    image_ids.push(image_id);
-                    processed_files += 1;
-                    progress_callback(processed_files, total_files);
-                }
-                Err(e) => {
-                    eprintln!("扫描文件失败 {:?}: {}", path, e);
-                    // 单文件失败不影响整体进度
-                    processed_files += 1;
-                    progress_callback(processed_files, total_files);
-                }
-            }
+            processed_files += 1;
+            progress_callback(processed_files, total_files);
         }
 
         Ok(image_ids)
     }
 
-    /// 统计目录下的图片文件数量
-    fn count_files(&self, root_path: &Path) -> Result<usize> {
-        let mut count = 0;
+    fn collect_files(&self, root_path: &Path) -> Result<Vec<std::path::PathBuf>> {
+        let mut files = Vec::new();
 
         for entry in WalkDir::new(root_path)
             .follow_links(false)
@@ -88,15 +84,13 @@ impl ScanEngine {
             let entry = entry.map_err(|e| AppError::FileSystem(format!("遍历目录失败: {}", e)))?;
 
             if entry.file_type().is_file() && self.is_supported_format(entry.path()) {
-                count += 1;
+                files.push(entry.into_path());
             }
         }
-
-        Ok(count)
+        Ok(files)
     }
 
-    /// 扫描单个文件
-    fn scan_file(
+    fn persist_features(
         &self,
         repository: &Repository,
         run_id: &str,
@@ -104,6 +98,7 @@ impl ScanEngine {
         root_path: &Path,
         file_path: &Path,
         role: FolderRole,
+        features: ImageFeatures,
     ) -> Result<i64> {
         let relative_path = file_path
             .strip_prefix(root_path)
@@ -111,7 +106,6 @@ impl ScanEngine {
             .to_string_lossy()
             .to_string();
 
-        let features = extract_image_features(file_path)?;
         let aspect_ratio = features.width as f64 / features.height as f64;
 
         // 创建图片记录

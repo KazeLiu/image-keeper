@@ -1,6 +1,16 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import type { Settings } from '@/types'
+
+interface BackendSettings {
+  default_compressed_ssim_threshold: number
+  default_variant_review_lower_bound: number
+  default_phash_max_distance: number
+  default_aspect_ratio_tolerance: number
+  auto_preselect_exact_duplicates: boolean
+  max_candidate_per_image: number
+}
 
 /**
  * 用户设置 Store
@@ -16,19 +26,19 @@ export const useSettingsStore = defineStore('settings', () => {
   })
 
   const isLoading = ref(false)
+  let backendSettings: BackendSettings | null = null
 
   // Getters
-  const ssimThresholdPercent = computed(() => {
-    return (settings.value.ssimThreshold * 100).toFixed(1)
+  const ssimThresholdValue = computed(() => {
+    return settings.value.ssimThreshold.toFixed(4)
   })
 
   // Actions
   async function loadSettings() {
     isLoading.value = true
     try {
-      // TODO: 从后端加载设置
-      // const loadedSettings = await invoke('load_settings')
-      // settings.value = loadedSettings
+      backendSettings = await invoke<BackendSettings>('load_settings')
+      settings.value.ssimThreshold = backendSettings.default_compressed_ssim_threshold
     } catch (error) {
       console.error('加载设置失败:', error)
     } finally {
@@ -39,8 +49,12 @@ export const useSettingsStore = defineStore('settings', () => {
   async function saveSettings() {
     isLoading.value = true
     try {
-      // TODO: 保存设置到后端
-      // await invoke('save_settings', { settings: settings.value })
+      backendSettings ??= await invoke<BackendSettings>('load_settings')
+      backendSettings = {
+        ...backendSettings,
+        default_compressed_ssim_threshold: settings.value.ssimThreshold
+      }
+      await invoke('save_settings', { settings: backendSettings })
     } catch (error) {
       console.error('保存设置失败:', error)
       throw error
@@ -56,7 +70,7 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     settings,
     isLoading,
-    ssimThresholdPercent,
+    ssimThresholdValue,
     loadSettings,
     saveSettings,
     updateSetting

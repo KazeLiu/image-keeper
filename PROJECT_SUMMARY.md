@@ -14,7 +14,7 @@
 2. **智能相似度分析**
    - pHash (感知哈希) 快速筛选候选图片对
    - SSIM (结构相似度) 精确计算相似程度
-   - 自动分类:压缩版本 (SSIM ≥ 0.99)、差分图 (0.75-0.99)
+   - 自动分类:压缩版本 (SSIM ≥ 0.995)、差分图 (0.75-0.995)
 
 3. **安全删除管理**
    - 回收站机制,支持误删恢复
@@ -257,7 +257,7 @@ PHashEngine::filter_candidates() {
     对于每个 Compare 图片:
         遍历 Baseline 图片:
             计算汉明距离 = hamming_distance(phash1, phash2)
-            if 汉明距离 < 10:
+            if 汉明距离 <= 10:
                 加入候选相似对
 }
 ```
@@ -282,12 +282,12 @@ SsimEngine::compute_similarity(img1, img2) {
     ssim_score = calculate_ssim_score()
     
     // 分类判定
-    if ssim_score >= 0.99:
+    if ssim_score >= 0.995:
         if 分辨率不同 || 大小比例 < 0.9:
             return "压缩版本"
         else:
             return "极度相似"
-    else if 0.75 <= ssim_score < 0.99:
+    else if 0.75 <= ssim_score < 0.995:
         if 分辨率相同 && 大小比例 > 0.95:
             return "差分图"
         else:
@@ -303,8 +303,8 @@ SsimEngine::compute_similarity(img1, img2) {
 ComparisonEngine::generate_report() {
     统计结果:
         ├─ 完全重复 (哈希相同)
-        ├─ 压缩版本 (SSIM ≥ 0.99)
-        ├─ 差分图 (0.75 ≤ SSIM < 0.99)
+        ├─ 压缩版本 (SSIM ≥ 0.995)
+        ├─ 差分图 (0.75 ≤ SSIM < 0.995)
         └─ 唯一图片
     
     导出格式:
@@ -464,7 +464,7 @@ CREATE INDEX idx_images_size ON images(width, height);
 - ⬜ 差分图组管理
 - ⬜ 智能保留策略 (最短路径、首选目录、最高分辨率)
 - ⬜ 增量扫描 (仅处理新增/修改文件)
-- ⬜ 并行 SSIM 计算优化
+- ✅ pHash 与标准 SSIM 统一使用 4 线程有界算法池
 - ⬜ 进度事件推送优化
 
 ### 高级特性

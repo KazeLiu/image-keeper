@@ -2,7 +2,6 @@ use crate::error::{AppError, Result};
 use fast_image_resize as fr;
 use image::DynamicImage;
 use std::num::NonZeroU32;
-use std::path::Path;
 
 /// 图片缩放器
 pub struct ImageResizer;
@@ -60,16 +59,6 @@ impl ImageResizer {
             .ok_or_else(|| AppError::Other("图片缩放失败".to_string()))?;
 
         Ok(DynamicImage::ImageRgba8(buffer))
-    }
-
-    /// 从文件加载并缩放图片
-    pub fn load_and_resize(
-        file_path: &Path,
-        target_width: u32,
-        target_height: u32,
-    ) -> Result<DynamicImage> {
-        let img = image::open(file_path)?;
-        Self::resize_to_target(&img, target_width, target_height)
     }
 }
 

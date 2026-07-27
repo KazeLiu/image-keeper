@@ -15,13 +15,17 @@ impl StandardSsim {
     /// 边界像素采用镜像延拓；返回值不裁剪，因此标准公式产生的负值会被保留。
     pub fn compute(left: &DynamicImage, right: &DynamicImage) -> Result<f64> {
         Self::validate_dimensions(left, right)?;
-        Self::compute_gray(left.to_luma8(), right.to_luma8())
+        let left = left.to_luma8();
+        let right = right.to_luma8();
+        Self::compute_gray(&left, &right)
     }
 
     /// 消费已解码图片计算结构相似性，允许调用方在转灰度时立即释放彩色原图。
     pub fn compute_owned(left: DynamicImage, right: DynamicImage) -> Result<f64> {
         Self::validate_dimensions(&left, &right)?;
-        Self::compute_gray(left.into_luma8(), right.into_luma8())
+        let left = left.into_luma8();
+        let right = right.into_luma8();
+        Self::compute_gray(&left, &right)
     }
 
     fn validate_dimensions(left: &DynamicImage, right: &DynamicImage) -> Result<()> {
@@ -34,7 +38,13 @@ impl StandardSsim {
         Ok(())
     }
 
-    fn compute_gray(left: GrayImage, right: GrayImage) -> Result<f64> {
+    pub(crate) fn compute_gray(left: &GrayImage, right: &GrayImage) -> Result<f64> {
+        if left.dimensions() != right.dimensions() {
+            return Err(AppError::SsimComputation("图片尺寸不匹配".to_string()));
+        }
+        if left.width() == 0 || left.height() == 0 {
+            return Err(AppError::SsimComputation("图片像素为空".to_string()));
+        }
         let kernel = gaussian_kernel();
         let mut horizontal_rows: HashMap<u32, Vec<[f64; 5]>> = HashMap::new();
         let mut score_sum = 0.0;
@@ -44,7 +54,7 @@ impl StandardSsim {
             for source_y in &required_rows {
                 horizontal_rows
                     .entry(*source_y)
-                    .or_insert_with(|| horizontal_stats_row(&left, &right, *source_y, &kernel));
+                    .or_insert_with(|| horizontal_stats_row(left, right, *source_y, &kernel));
             }
 
             for x in 0..left.width() as usize {

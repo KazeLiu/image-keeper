@@ -281,7 +281,7 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
             (profile_id, hash_algorithm, phash_algorithm, phash_hash_size, ssim_window_size,
              normalization_version, resize_algorithm, created_at)
            VALUES
-            (?1, 'blake3', 'dct-gradient-combined', 8, 11, 1, 'lanczos3', strftime('%s', 'now'))"#,
+            (?1, 'blake3', 'dct-gradient-combined', 8, 11, 2, 'lanczos3', strftime('%s', 'now'))"#,
         [CURRENT_ALGORITHM_PROFILE_ID],
     )?;
     Ok(())

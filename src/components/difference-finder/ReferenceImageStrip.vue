@@ -2,9 +2,8 @@
   <section class="panel reference-panel" aria-labelledby="reference-title">
     <div class="panel-heading">
       <div>
-        <span class="step">01</span>
         <h2 id="reference-title">参考图片</h2>
-        <p>可一次添加多张；查找完成后点击图片筛选对应结果。</p>
+        <p>可一次添加多张，用来查找相同图片和差分图。</p>
       </div>
       <el-button type="primary" plain :icon="Plus" @click="chooseReferences">添加图片</el-button>
     </div>
@@ -105,9 +104,8 @@ onBeforeUnmount(() => unlistenDrop?.())
   margin-bottom: 14px;
 }
 
-.panel-heading h2 { display: inline; margin: 0 0 0 8px; font-size: 17px; }
-.panel-heading p { margin: 5px 0 0 32px; color: #606266; font-size: 12px; }
-.step { color: #409eff; font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.panel-heading h2 { margin: 0; font-size: 17px; }
+.panel-heading p { margin: 5px 0 0; color: #606266; font-size: 12px; }
 
 .reference-strip { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 6px; }
 .reference-card { position: relative; width: 112px; height: 116px; flex: 0 0 auto; border: 1px solid #dcdfe6; border-radius: 8px; background: #fff; overflow: hidden; transition: border-color .18s, box-shadow .18s; }

@@ -1,82 +1,65 @@
 use crate::error::{AppError, Result};
-use image::DynamicImage;
+use image::{DynamicImage, GrayImage};
+use std::path::Path;
 
-/// 结构相似性计算器
-///
-/// 注意：这是一个简化的结构相似性实现
-/// 完整的生产级实现建议使用 OpenCV 或专门的结构相似性库
+use super::{resize::ImageResizer, standard::StandardSsim};
+
+/// 全程序唯一的标准结构相似性计算入口。
 pub struct SsimComputer;
 
 impl SsimComputer {
-    const MAX_SSIM_EDGE: u32 = 512;
-
-    /// 计算两张图片的结构相似性
+    /// 使用 11×11、sigma=1.5 的高斯窗口计算标准灰度 SSIM。
     ///
-    /// 返回值范围: 0.0 ~ 1.0, 1.0 表示完全相同
+    /// 1.0 表示完全相同；标准公式对反相关结构可能返回负值。
     pub fn compute(img1: &DynamicImage, img2: &DynamicImage) -> Result<f64> {
-        // 确保两张图片尺寸相同
-        if img1.width() != img2.width() || img1.height() != img2.height() {
-            return Err(AppError::SsimComputation("图片尺寸不匹配".to_string()));
-        }
-
-        // 转换为灰度图
-        let gray1 = img1.to_luma8();
-        let gray2 = img2.to_luma8();
-
-        // 简化的结构相似性计算
-        // 这里使用均方误差的简化版本
-        // 生产环境建议使用完整的结构相似性算法或 OpenCV
-        let pixels1 = gray1.as_raw();
-        let pixels2 = gray2.as_raw();
-
-        let mut sum_diff_sq = 0.0;
-
-        for (p1, p2) in pixels1.iter().zip(pixels2.iter()) {
-            let diff = (*p1 as f64) - (*p2 as f64);
-            sum_diff_sq += diff * diff;
-        }
-
-        let n = pixels1.len() as f64;
-        let mse = sum_diff_sq / n;
-
-        // 转换 MSE 为相似度 (0-1)
-        // MSE 越小，相似度越高
-        let max_value = 255.0 * 255.0;
-        let similarity = 1.0 - (mse / max_value).min(1.0);
-
-        Ok(similarity)
+        StandardSsim::compute(img1, img2)
     }
 
-    /// 计算两个文件的结构相似性
+    /// 对已归一化的灰度图计算同一套标准 SSIM，供缓存路径复用。
+    pub fn compute_gray(left: &GrayImage, right: &GrayImage) -> Result<f64> {
+        StandardSsim::compute_gray(left, right)
+    }
+
+    /// 计算两个文件的标准 SSIM。参数顺序不影响归一化结果。
     ///
-    /// large_path: 大图路径
-    /// small_path: 小图路径
-    ///
-    /// 会自动将大图缩放到小图尺寸后再计算
-    pub fn compute_from_files(
-        large_path: &std::path::Path,
-        small_path: &std::path::Path,
-    ) -> Result<f64> {
-        use super::resize::ImageResizer;
+    /// 两张图片统一到像素数较少图片的完整宽高，不再使用 512px 降采样。
+    pub fn compute_from_files(left_path: &Path, right_path: &Path) -> Result<f64> {
+        let left = image::open(left_path)?;
+        let right = image::open(right_path)?;
+        let target = Self::pair_target_dimensions(
+            (left.width(), left.height()),
+            (right.width(), right.height()),
+        );
+        let left = Self::prepare_image(&left, target.0, target.1)?;
+        let right = Self::prepare_image(&right, target.0, target.1)?;
+        Self::compute_gray(&left, &right)
+    }
 
-        // 加载小图
-        let small_img = image::open(small_path)?;
-        let (target_width, target_height) =
-            Self::target_dimensions(small_img.width(), small_img.height(), Self::MAX_SSIM_EDGE);
+    /// 为同一图片对选择唯一目标尺寸：像素数较少者优先，平局时按宽、高排序。
+    pub fn pair_target_dimensions(left: (u32, u32), right: (u32, u32)) -> (u32, u32) {
+        let left_key = (left.0 as u64 * left.1 as u64, left.0, left.1);
+        let right_key = (right.0 as u64 * right.1 as u64, right.0, right.1);
+        if left_key <= right_key {
+            left
+        } else {
+            right
+        }
+    }
 
-        let small_img_resized =
-            if small_img.width() == target_width && small_img.height() == target_height {
-                small_img
-            } else {
-                ImageResizer::resize_to_target(&small_img, target_width, target_height)?
-            };
-
-        // 加载大图并缩放
-        let large_img_resized =
-            ImageResizer::load_and_resize(large_path, target_width, target_height)?;
-
-        // 计算结构相似性
-        Self::compute(&large_img_resized, &small_img_resized)
+    /// 使用统一的 Lanczos3 路径把图片准备为目标尺寸的灰度数据。
+    pub fn prepare_image(
+        image: &DynamicImage,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<GrayImage> {
+        if target_width == 0 || target_height == 0 {
+            return Err(AppError::SsimComputation("目标图片像素为空".to_string()));
+        }
+        if image.width() == target_width && image.height() == target_height {
+            Ok(image.to_luma8())
+        } else {
+            Ok(ImageResizer::resize_to_target(image, target_width, target_height)?.into_luma8())
+        }
     }
 
     /// 根据较小图片尺寸计算结构相似性归一化目标尺寸，并限制最大边长。
@@ -101,6 +84,8 @@ impl SsimComputer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ssim::standard::StandardSsim;
+    use image::{GrayImage, Luma};
 
     #[test]
     fn test_compute_identical_images() {
@@ -118,5 +103,20 @@ mod tests {
 
         assert_eq!(width, 512);
         assert_eq!(height, 420);
+    }
+
+    #[test]
+    fn canonical_compute_uses_the_standard_windowed_formula() {
+        let left = DynamicImage::ImageLuma8(GrayImage::from_fn(32, 24, |x, y| {
+            Luma([((x * 7 + y * 11) % 256) as u8])
+        }));
+        let right = DynamicImage::ImageLuma8(GrayImage::from_fn(32, 24, |x, y| {
+            Luma([((x * 13 + y * 3 + 17) % 256) as u8])
+        }));
+
+        let expected = StandardSsim::compute(&left, &right).unwrap();
+        let actual = SsimComputer::compute(&left, &right).unwrap();
+
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
     }
 }

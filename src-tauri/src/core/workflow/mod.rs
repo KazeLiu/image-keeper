@@ -1,8 +1,10 @@
-use crate::core::algorithm_profile::CURRENT_ALGORITHM_PROFILE_ID;
+use crate::core::algorithm_profile::{algorithm_pool, CURRENT_ALGORITHM_PROFILE_ID};
 use crate::db::models::{FolderRole, RunStatus, ScanProgressEvent};
 use crate::db::repository::Repository;
 use crate::error::{AppError, Result};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -468,7 +470,7 @@ impl WorkflowEngine {
                     all_candidate_ids: Some(baseline_ids.clone()),
                     candidate_truncated: false,
                     phash_distance: Some(0),
-                    ssim_score: None,
+                    ssim_score: Some(1.0),
                     size_ratio: None,
                     resolution_ratio: None,
                     aspect_diff: None,
@@ -666,10 +668,10 @@ impl WorkflowEngine {
             .await;
 
         // 1. 获取待计算结构相似性的候选对
-        let pending_pairs = {
+        let pending_pairs = Arc::new({
             let repo = self.repository.lock().unwrap();
             repo.get_pending_ssim_results(run_id)?
-        };
+        });
 
         let total = pending_pairs.len();
         let mut processed = 0;
@@ -687,51 +689,53 @@ impl WorkflowEngine {
         use crate::core::ssim::SsimEngine;
         use std::path::Path;
 
-        // 2. 计算每个候选对的结构相似性
-        for pair in pending_pairs {
-            let _ = progress_tx
-                .send(ScanProgressEvent {
-                    run_id: run_id.to_string(),
-                    phase: "scoring".to_string(),
-                    total_files: total as i64,
-                    processed_files: processed as i64,
-                    current_file: Some(format!(
-                        "计算结构相似性 {}/{}: {}",
-                        processed + 1,
-                        total,
-                        Path::new(&pair.comparison_path)
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("当前图片")
-                    )),
-                })
-                .await;
+        // 2. 四线程计算通过有界通道交给单一消费者落库。
+        let (result_tx, result_rx) = sync_channel(algorithm_pool().current_num_threads().max(1));
+        let producer_pairs = Arc::clone(&pending_pairs);
+        algorithm_pool().spawn(move || {
+            producer_pairs.par_iter().enumerate().for_each_with(
+                result_tx,
+                |sender, (index, pair)| {
+                    let outcome = SsimEngine::compute_ssim(
+                        Path::new(&pair.baseline_path),
+                        Path::new(&pair.comparison_path),
+                    )
+                    .map(|ssim_score| {
+                        let size_ratio = pair.comparison_size as f64 / pair.baseline_size as f64;
+                        let resolution_ratio = (pair.comparison_width as f64
+                            * pair.comparison_height as f64)
+                            / (pair.baseline_width as f64 * pair.baseline_height as f64);
+                        let comp_aspect =
+                            pair.comparison_width as f64 / pair.comparison_height as f64;
+                        let base_aspect = pair.baseline_width as f64 / pair.baseline_height as f64;
+                        let aspect_diff =
+                            (comp_aspect - base_aspect).abs() / comp_aspect.max(base_aspect);
+                        (
+                            ssim_score,
+                            size_ratio,
+                            resolution_ratio,
+                            aspect_diff,
+                            pair.comparison_width < pair.baseline_width
+                                && pair.comparison_height < pair.baseline_height,
+                            pair.comparison_size < pair.baseline_size,
+                        )
+                    });
+                    let _ = sender.send((index, outcome));
+                },
+            );
+        });
 
-            match SsimEngine::compute_ssim(
-                Path::new(&pair.baseline_path),
-                Path::new(&pair.comparison_path),
-            ) {
-                Ok(ssim_score) => {
-                    // 计算尺寸和分辨率比率
-                    let size_ratio = pair.comparison_size as f64 / pair.baseline_size as f64;
-                    let resolution_ratio = (pair.comparison_width as f64
-                        * pair.comparison_height as f64)
-                        / (pair.baseline_width as f64 * pair.baseline_height as f64);
-
-                    // 计算宽高比差异
-                    let comp_aspect = pair.comparison_width as f64 / pair.comparison_height as f64;
-                    let base_aspect = pair.baseline_width as f64 / pair.baseline_height as f64;
-                    let aspect_diff =
-                        (comp_aspect - base_aspect).abs() / comp_aspect.max(base_aspect);
-
-                    // 方向性：文件大小
-                    let direction_smaller_filesize = pair.comparison_size < pair.baseline_size;
-
-                    // 方向性：分辨率
-                    let direction_smaller_resolution = pair.comparison_width < pair.baseline_width
-                        && pair.comparison_height < pair.baseline_height;
-
-                    // 更新数据库
+        for (index, outcome) in result_rx {
+            let pair = &pending_pairs[index];
+            match outcome {
+                Ok((
+                    ssim_score,
+                    size_ratio,
+                    resolution_ratio,
+                    aspect_diff,
+                    direction_smaller_resolution,
+                    direction_smaller_filesize,
+                )) => {
                     let repo = self.repository.lock().unwrap();
                     repo.update_analysis_ssim(
                         pair.result_id,
@@ -743,27 +747,22 @@ impl WorkflowEngine {
                         direction_smaller_filesize,
                     )?;
                 }
-                Err(e) => {
+                Err(error) => {
                     eprintln!(
                         "计算结构相似性失败: {} <-> {}: {}",
-                        pair.comparison_path, pair.baseline_path, e
+                        pair.comparison_path, pair.baseline_path, error
                     );
-                    // 失败时保持 not_evaluated 状态
                 }
             }
 
             processed += 1;
-
-            // 定期发送进度
-            let _ = progress_tx
-                .send(ScanProgressEvent {
-                    run_id: run_id.to_string(),
-                    phase: "scoring".to_string(),
-                    total_files: total as i64,
-                    processed_files: processed as i64,
-                    current_file: Some(format!("计算结构相似性: {}/{}", processed, total)),
-                })
-                .await;
+            let _ = progress_tx.try_send(ScanProgressEvent {
+                run_id: run_id.to_string(),
+                phase: "scoring".to_string(),
+                total_files: total as i64,
+                processed_files: processed as i64,
+                current_file: Some(format!("计算结构相似性: {}/{}", processed, total)),
+            });
         }
 
         Ok(())
@@ -894,6 +893,7 @@ impl WorkflowEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::AnalysisType;
     use crate::db::repository::RunConfig;
     use crate::db::schema::initialize_database;
     use image::{ImageBuffer, Rgba};
@@ -988,5 +988,59 @@ mod tests {
             stats.comparison_total, 2,
             "内部同目录对比的统计总数应按待分析图片数展示"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_duplicate_persists_the_same_one_ssim_as_other_entry_points() {
+        let temp = tempdir().unwrap();
+        let baseline_dir = temp.path().join("baseline");
+        let comparison_dir = temp.path().join("comparison");
+        std::fs::create_dir(&baseline_dir).unwrap();
+        std::fs::create_dir(&comparison_dir).unwrap();
+        write_test_png(&baseline_dir.join("same.png"), [12, 34, 56, 255]);
+        std::fs::copy(
+            baseline_dir.join("same.png"),
+            comparison_dir.join("same.png"),
+        )
+        .unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_database(&conn).unwrap();
+        let repo = Arc::new(Mutex::new(Repository::new(conn)));
+        let run_id = "exact-duplicate-ssim";
+        {
+            let repo = repo.lock().unwrap();
+            repo.create_run(
+                run_id,
+                "test",
+                CURRENT_ALGORITHM_PROFILE_ID,
+                baseline_dir.to_string_lossy().as_ref(),
+                "A",
+                &[comparison_dir.to_string_lossy().to_string()],
+                &["B".to_string()],
+                &RunConfig::default(),
+            )
+            .unwrap();
+        }
+
+        let engine = WorkflowEngine::new(repo.clone());
+        let (progress_tx, _progress_rx) = mpsc::channel(32);
+        engine
+            .execute_comparison(run_id, baseline_dir, vec![comparison_dir], progress_tx)
+            .await
+            .unwrap();
+
+        let repo = repo.lock().unwrap();
+        let (analysis_type, ssim_score): (String, Option<f64>) = repo
+            .conn()
+            .query_row(
+                "SELECT analysis_type, ssim_score FROM analysis_results WHERE run_id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(analysis_type, AnalysisType::ExactDuplicate.as_str());
+        assert_eq!(ssim_score, Some(1.0));
     }
 }

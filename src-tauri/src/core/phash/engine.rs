@@ -1,7 +1,9 @@
 use super::PHashComputer;
+use crate::core::algorithm_profile::algorithm_pool;
 use crate::db::models::ScanProgressEvent;
 use crate::db::repository::Repository;
 use crate::error::Result;
+use rayon::prelude::*;
 use std::path::Path;
 
 /// 感知哈希引擎
@@ -23,10 +25,14 @@ impl PHashEngine {
 
         let mut phashed_count = 0u64;
 
-        // 顺序计算感知哈希
-        for (id, file_path) in &images {
-            // 计算感知哈希
-            let phash = PHashComputer::compute_phash(Path::new(file_path))?;
+        let hashes = algorithm_pool().install(|| {
+            images
+                .par_iter()
+                .map(|(_, file_path)| PHashComputer::compute_phash(Path::new(file_path)))
+                .collect::<Vec<_>>()
+        });
+        for ((id, file_path), hash) in images.iter().zip(hashes) {
+            let phash = hash?;
 
             // 更新数据库
             repository.conn().execute(

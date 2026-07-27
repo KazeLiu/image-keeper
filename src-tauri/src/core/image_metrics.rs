@@ -1,5 +1,5 @@
 use crate::core::phash::PHashComputer;
-use crate::core::ssim::{compute::SsimComputer, resize::ImageResizer, standard::StandardSsim};
+use crate::core::ssim::{compute::SsimComputer, resize::ImageResizer};
 use crate::error::{AppError, Result};
 use base64::{engine::general_purpose, Engine as _};
 use image::ImageOutputFormat;
@@ -28,14 +28,7 @@ pub struct TestImagePhashResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TestLowPrecisionResult {
-    pub similarity: f64,
-    pub duration_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TestStandardSsimResult {
+pub struct TestSsimResult {
     pub score: f64,
     pub duration_ms: u64,
 }
@@ -45,13 +38,7 @@ pub fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
 }
 
 pub fn pair_target_dimensions(left: (u32, u32), right: (u32, u32)) -> (u32, u32) {
-    let left_key = (left.0 as u64 * left.1 as u64, left.0, left.1);
-    let right_key = (right.0 as u64 * right.1 as u64, right.0, right.1);
-    if left_key <= right_key {
-        left
-    } else {
-        right
-    }
+    SsimComputer::pair_target_dimensions(left, right)
 }
 
 pub fn load_test_image_sync(path: String) -> Result<LoadedTestImage> {
@@ -108,21 +95,6 @@ pub fn compute_test_phash_sync(
     })
 }
 
-pub fn compute_low_precision_sync(
-    baseline_path: String,
-    candidate_path: String,
-) -> Result<TestLowPrecisionResult> {
-    let started = Instant::now();
-
-    Ok(TestLowPrecisionResult {
-        similarity: SsimComputer::compute_from_files(
-            Path::new(&baseline_path),
-            Path::new(&candidate_path),
-        )?,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
-}
-
 pub(crate) fn normalized_pair(
     left_path: &Path,
     right_path: &Path,
@@ -150,14 +122,14 @@ pub(crate) fn normalized_pair(
     Ok((normalize(left)?, normalize(right)?))
 }
 
-pub fn compute_standard_ssim_sync(
+pub fn compute_test_ssim_sync(
     baseline_path: String,
     candidate_path: String,
     baseline_file_size: u64,
     baseline_modified_at_ms: u64,
     candidate_file_size: u64,
     candidate_modified_at_ms: u64,
-) -> Result<TestStandardSsimResult> {
+) -> Result<TestSsimResult> {
     let started = Instant::now();
     validate_file_fingerprint(
         Path::new(&baseline_path),
@@ -169,11 +141,11 @@ pub fn compute_standard_ssim_sync(
         candidate_file_size,
         candidate_modified_at_ms,
     )?;
-    let (baseline, candidate) =
-        normalized_pair(Path::new(&baseline_path), Path::new(&candidate_path), None)?;
-
-    Ok(TestStandardSsimResult {
-        score: StandardSsim::compute_owned(baseline, candidate)?,
+    Ok(TestSsimResult {
+        score: SsimComputer::compute_from_files(
+            Path::new(&baseline_path),
+            Path::new(&candidate_path),
+        )?,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
