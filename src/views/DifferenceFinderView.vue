@@ -1,6 +1,6 @@
 <template>
   <div class="finder-view">
-    <header class="finder-header">
+    <header class="finder-header finder-card">
       <div class="title-block">
         <h1>找差分图</h1>
         <p>{{ currentStep === 'setup' ? '选择参考图片和搜索文件夹' : '勾选需要的文件，直接编辑或批量生成新名称' }}</p>
@@ -31,7 +31,7 @@
 
     <main class="finder-main">
       <section v-show="currentStep === 'setup'" class="setup-stage" aria-label="第一步：选择查找范围">
-        <div class="setup-grid">
+        <div class="setup-grid stacked">
           <ReferenceImageStrip />
           <SearchSetupPanel @search-complete="showResults" />
         </div>
@@ -55,6 +55,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import ReferenceImageStrip from '@/components/difference-finder/ReferenceImageStrip.vue'
 import SearchSetupPanel from '@/components/difference-finder/SearchSetupPanel.vue'
@@ -69,9 +70,22 @@ function showResults() {
   currentStep.value = 'results'
 }
 
-function editSearch() {
-  store.progress = null
-  currentStep.value = 'setup'
+async function editSearch() {
+  try {
+    await ElMessageBox.confirm(
+      '返回后需要重新查找图片，是否继续？',
+      '重新选择',
+      { confirmButtonText: '继续返回', cancelButtonText: '取消', type: 'warning' }
+    )
+    store.progress = null
+    store.matches = []
+    store.errors = []
+    store.orderedPaths = []
+    store.clearSelection()
+    currentStep.value = 'setup'
+  } catch {
+    // Cancel keeps the current results and rename draft intact.
+  }
 }
 </script>
 
@@ -91,8 +105,8 @@ function editSearch() {
   max-width: 1440px;
   width: 100%;
   box-sizing: border-box;
-  margin: 0 auto 20px;
-  padding: 4px 4px 0;
+  margin: 0 auto 16px;
+  padding: 18px 22px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -103,6 +117,12 @@ function editSearch() {
   margin: 0;
   font-size: 24px;
   line-height: 1.3;
+}
+
+.finder-card {
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .finder-header p {
@@ -163,10 +183,12 @@ function editSearch() {
 
 .setup-grid {
   width: 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(380px, .9fr);
+  display: flex;
+  flex-direction: column;
   gap: 16px;
 }
+
+.setup-grid > * { width: 100%; }
 
 .results-stage {
   min-height: 0;
@@ -191,7 +213,6 @@ function editSearch() {
   .workflow-steps { min-width: 0; width: 100%; }
   .workflow-step { min-width: 0; flex: 1; }
   .step-line { width: 40px; }
-  .setup-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 1120px) {

@@ -1,9 +1,10 @@
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import { describe, expect, it } from 'vitest'
+import ElementPlus, { ElMessageBox } from 'element-plus'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DifferenceFinderView from './DifferenceFinderView.vue'
+import { useDifferenceFinderStore } from '@/stores/differenceFinderStore'
 
 const ReferenceImageStripStub = defineComponent({
   name: 'ReferenceImageStrip',
@@ -22,9 +23,10 @@ const BatchRenameGridStub = defineComponent({
 })
 
 function mountView() {
-  return mount(DifferenceFinderView, {
+  const pinia = createPinia()
+  const wrapper = mount(DifferenceFinderView, {
     global: {
-      plugins: [createPinia(), ElementPlus],
+      plugins: [pinia, ElementPlus],
       stubs: {
         ReferenceImageStrip: ReferenceImageStripStub,
         SearchSetupPanel: SearchSetupPanelStub,
@@ -33,12 +35,17 @@ function mountView() {
       }
     }
   })
+  return { wrapper, store: useDifferenceFinderStore(pinia) }
 }
 
 describe('DifferenceFinderView two-step workflow', () => {
-  it('shows only search setup before a search is completed', () => {
-    const wrapper = mountView()
+  beforeEach(() => vi.restoreAllMocks())
 
+  it('shows only search setup before a search is completed', () => {
+    const { wrapper } = mountView()
+
+    expect(wrapper.get('.finder-header').classes()).toContain('finder-card')
+    expect(wrapper.get('.setup-grid').classes()).toContain('stacked')
     expect(wrapper.get('[data-test="reference-setup"]').exists()).toBe(true)
     expect(wrapper.get('[data-test="complete-search"]').exists()).toBe(true)
     expect(wrapper.get('.results-stage').attributes('style')).toContain('display: none')
@@ -46,7 +53,10 @@ describe('DifferenceFinderView two-step workflow', () => {
   })
 
   it('moves to the file table after search and can return to setup', async () => {
-    const wrapper = mountView()
+    const { wrapper, store } = mountView()
+    store.matches = [{ filePath: 'C:\\result.jpg' } as any]
+    store.selectedPaths = ['C:\\result.jpg']
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm')
 
     await wrapper.get('[data-test="complete-search"]').trigger('click')
 
@@ -55,17 +65,39 @@ describe('DifferenceFinderView two-step workflow', () => {
     expect(wrapper.get('[data-test="step-results"]').attributes('aria-current')).toBe('step')
 
     await wrapper.get('[data-test="edit-search"]').trigger('click')
+    await flushPromises()
 
+    expect(confirm).toHaveBeenCalledWith(
+      '返回后需要重新查找图片，是否继续？',
+      '重新选择',
+      expect.objectContaining({ confirmButtonText: '继续返回' })
+    )
     expect(wrapper.get('[data-test="reference-setup"]').exists()).toBe(true)
     expect(wrapper.get('.results-stage').attributes('style')).toContain('display: none')
+    expect(store.matches).toEqual([])
+    expect(store.selectedPaths).toEqual([])
+  })
+
+  it('stays on the result table when returning is cancelled', async () => {
+    const { wrapper } = mountView()
+    vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+
+    await wrapper.get('[data-test="complete-search"]').trigger('click')
+    await wrapper.get('[data-test="edit-search"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="step-results"]').attributes('aria-current')).toBe('step')
+    expect(wrapper.get('.setup-stage').attributes('style')).toContain('display: none')
   })
 
   it('preserves rename drafts while returning to edit search inputs', async () => {
-    const wrapper = mountView()
+    const { wrapper } = mountView()
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm')
 
     await wrapper.get('[data-test="complete-search"]').trigger('click')
     await wrapper.get('[data-test="rename-draft"]').setValue('kept-name.jpg')
     await wrapper.get('[data-test="edit-search"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[data-test="complete-search"]').trigger('click')
 
     expect((wrapper.get('[data-test="rename-draft"]').element as HTMLInputElement).value).toBe('kept-name.jpg')

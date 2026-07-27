@@ -1,7 +1,7 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import BatchRenameGrid from './BatchRenameGrid.vue'
 import { useDifferenceFinderStore } from '@/stores/differenceFinderStore'
 import type { DifferenceMatchItem } from '@/api/differenceFinder'
@@ -21,12 +21,31 @@ const apiMocks = vi.hoisted(() => ({
     targetPath: item.sourcePath,
     issues: [],
     blocking: false
-  })))
+  }))),
+  previewDifferenceExplicitRename: vi.fn(async (items: Array<{ sourcePath: string; newName: string }>) => items.map(item => ({
+    sourcePath: item.sourcePath,
+    originalName: item.sourcePath.split('\\').pop() || item.sourcePath,
+    proposedName: item.newName,
+    targetPath: item.sourcePath,
+    issues: [],
+    blocking: false
+  }))),
+  executeDifferenceRename: vi.fn(async () => ({
+    batchId: 'rename-1',
+    kind: 'rename',
+    entries: [],
+    succeeded: 1,
+    skipped: 0,
+    failed: 0,
+    reversible: true
+  }))
 }))
 
 vi.mock('@/api/differenceFinder', async importOriginal => ({
   ...await importOriginal<typeof import('@/api/differenceFinder')>(),
-  previewDifferenceRename: apiMocks.previewDifferenceRename
+  previewDifferenceRename: apiMocks.previewDifferenceRename,
+  previewDifferenceExplicitRename: apiMocks.previewDifferenceExplicitRename,
+  executeDifferenceRename: apiMocks.executeDifferenceRename
 }))
 
 function match(fileName: string): DifferenceMatchItem {
@@ -65,7 +84,26 @@ function renamePreview(item: DifferenceMatchItem) {
   }
 }
 
+const selectStubs = {
+  ElSelect: { template: '<div class="select-stub"><slot /></div>' },
+  ElOption: { template: '<div class="option-stub"><slot /></div>' }
+}
+
+function mountGrid(pinia: ReturnType<typeof createPinia>, options: { attachTo?: HTMLElement; teleport?: boolean } = {}) {
+  return mount(BatchRenameGrid, {
+    attachTo: options.attachTo,
+    global: {
+      plugins: [pinia, ElementPlus],
+      stubs: {
+        ...selectStubs,
+        ...(options.teleport ? { teleport: true } : {})
+      }
+    }
+  })
+}
+
 describe('BatchRenameGrid unified file table', () => {
+  enableAutoUnmount(afterEach)
   beforeEach(() => vi.clearAllMocks())
 
   it('shows all matching files and limits rename preparation to checked rows', async () => {
@@ -75,9 +113,7 @@ describe('BatchRenameGrid unified file table', () => {
     store.matches = [match('first.jpg'), match('second.jpg')]
     store.orderedPaths = store.matches.map(item => item.filePath)
 
-    const wrapper = mount(BatchRenameGrid, {
-      global: { plugins: [pinia, ElementPlus] }
-    })
+    const wrapper = mountGrid(pinia)
     await flushPromises()
 
     expect(wrapper.findAll('[data-test="file-row"]')).toHaveLength(2)
@@ -89,6 +125,48 @@ describe('BatchRenameGrid unified file table', () => {
     expect(store.selectedPaths).toEqual(['C:\\images\\first.jpg'])
     expect(apiMocks.previewDifferenceRename).toHaveBeenCalledTimes(1)
     expect(apiMocks.previewDifferenceRename.mock.calls[0][0]).toHaveLength(1)
+  })
+
+  it('shows a thumbnail for each reference image option', async () => {
+    const pinia = createPinia()
+    const store = useDifferenceFinderStore(pinia)
+    store.references = [
+      { id: 'ref-1', name: 'primary.png', path: 'C:\\primary.png' },
+      { id: 'ref-2', name: 'other.png', path: 'C:\\other.png' }
+    ]
+    store.matches = [match('first.jpg')]
+    store.orderedPaths = store.matches.map(item => item.filePath)
+
+    mountGrid(pinia, { attachTo: document.body })
+    await flushPromises()
+
+    expect(document.body.querySelectorAll('[data-test="reference-option-image"]')).toHaveLength(2)
+  })
+
+  it('previews old and new names before confirming the rename', async () => {
+    const pinia = createPinia()
+    const store = useDifferenceFinderStore(pinia)
+    const item = match('first.jpg')
+    store.references = [{ id: 'ref-1', name: 'ref.png', path: 'C:\\ref.png' }]
+    store.matches = [item]
+    store.orderedPaths = [item.filePath]
+    store.selectedPaths = [item.filePath]
+    store.renamePreview = [renamePreview(item)]
+
+    const wrapper = mountGrid(pinia, { attachTo: document.body, teleport: true })
+    await flushPromises()
+
+    await wrapper.get('[data-test="preview-rename"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.executeDifferenceRename).not.toHaveBeenCalled()
+    const dialog = wrapper.get('[data-test="rename-preview-dialog"]')
+    expect(dialog.text()).toContain('first.jpg')
+
+    await wrapper.get('[data-test="confirm-rename"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.executeDifferenceRename).toHaveBeenCalledTimes(1)
   })
 
   it('shows the relation for the active reference filter', async () => {
@@ -110,9 +188,7 @@ describe('BatchRenameGrid unified file table', () => {
     store.orderedPaths = [item.filePath]
     store.activeReferenceId = 'ref-2'
 
-    const wrapper = mount(BatchRenameGrid, {
-      global: { plugins: [pinia, ElementPlus] }
-    })
+    const wrapper = mountGrid(pinia)
     await flushPromises()
 
     expect(wrapper.get('.match-cell').text()).toContain('other · 0.88')
@@ -134,7 +210,7 @@ describe('BatchRenameGrid unified file table', () => {
     store.orderedPaths = [item.filePath]
     store.selectedPaths = [item.filePath]
 
-    mount(BatchRenameGrid, { global: { plugins: [pinia, ElementPlus] } })
+    mountGrid(pinia)
     await flushPromises()
     expect(apiMocks.previewDifferenceRename).toHaveBeenCalledTimes(1)
 
@@ -154,11 +230,11 @@ describe('BatchRenameGrid unified file table', () => {
     store.selectedPaths = [item.filePath]
     store.renamePreview = [renamePreview(item)]
 
-    const wrapper = mount(BatchRenameGrid, { global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mountGrid(pinia)
     await flushPromises()
     store.isPreviewing = true
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.get('[data-test="execute-rename"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-test="preview-rename"]').attributes('disabled')).toBeDefined()
   })
 })
