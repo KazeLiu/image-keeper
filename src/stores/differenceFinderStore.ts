@@ -34,6 +34,7 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
   const currentSessionId = ref<string | null>(null)
   const renamePreview = ref<RenamePreviewItem[]>([])
   const isPreviewing = ref(false)
+  let renamePreviewGeneration = 0
 
   const filteredMatches = computed(() => matches.value.filter(item => {
     const referenceMatches = !activeReferenceId.value || item.relations.some(
@@ -67,7 +68,13 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
 
   function removeReference(id: string) {
     references.value = references.value.filter(item => item.id !== id)
-    if (activeReferenceId.value === id) activeReferenceId.value = references.value[0]?.id || null
+    if (activeReferenceId.value === id) setActiveReference(references.value[0]?.id || null)
+  }
+
+  function setActiveReference(id: string | null) {
+    if (activeReferenceId.value === id) return
+    activeReferenceId.value = id
+    invalidateRenamePreview()
   }
 
   function addTargetRoots(paths: string[]) {
@@ -86,7 +93,7 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     errors.value = []
     progress.value = null
     selectedPaths.value = []
-    renamePreview.value = []
+    invalidateRenamePreview()
     let unlisten: (() => void) | null = null
     try {
       unlisten = await listenDifferenceSearchProgress(value => {
@@ -117,20 +124,34 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     const key = normalizePath(path)
     const exists = selectedPaths.value.some(item => normalizePath(item) === key)
     const shouldSelect = selected ?? !exists
-    selectedPaths.value = shouldSelect
+    const nextPaths = shouldSelect
       ? exists ? selectedPaths.value : [...selectedPaths.value, path]
       : selectedPaths.value.filter(item => normalizePath(item) !== key)
+    if (nextPaths === selectedPaths.value) return
+    selectedPaths.value = nextPaths
+    invalidateRenamePreview()
   }
 
   function selectFiltered() {
     const merged = new Map(selectedPaths.value.map(path => [normalizePath(path), path]))
     filteredMatches.value.forEach(item => merged.set(normalizePath(item.filePath), item.filePath))
-    selectedPaths.value = [...merged.values()]
+    const nextPaths = [...merged.values()]
+    if (samePaths(nextPaths, selectedPaths.value)) return
+    selectedPaths.value = nextPaths
+    invalidateRenamePreview()
+  }
+
+  function deselectFiltered() {
+    const filteredKeys = new Set(filteredMatches.value.map(item => normalizePath(item.filePath)))
+    const nextPaths = selectedPaths.value.filter(path => !filteredKeys.has(normalizePath(path)))
+    if (samePaths(nextPaths, selectedPaths.value)) return
+    selectedPaths.value = nextPaths
+    invalidateRenamePreview()
   }
 
   function clearSelection() {
     selectedPaths.value = []
-    renamePreview.value = []
+    invalidateRenamePreview()
   }
 
   function reorderSelected(from: number, to: number) {
@@ -146,11 +167,17 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
   }
 
   async function generateRenamePreview(rule: RenameRule) {
-    if (orderedSelectedMatches.value.length === 0) return
+    const generation = ++renamePreviewGeneration
+    const selectedItems = [...orderedSelectedMatches.value]
+    if (selectedItems.length === 0) {
+      renamePreview.value = []
+      isPreviewing.value = false
+      return
+    }
     isPreviewing.value = true
     try {
-      renamePreview.value = await previewDifferenceRename(
-        orderedSelectedMatches.value.map((item, index) => {
+      const preview = await previewDifferenceRename(
+        selectedItems.map((item, index) => {
           const referenceId = activeReferenceId.value
             && item.relations.some(relation => relation.referenceId === activeReferenceId.value)
             ? activeReferenceId.value
@@ -165,9 +192,16 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
         }),
         rule
       )
+      if (generation === renamePreviewGeneration) renamePreview.value = preview
     } finally {
-      isPreviewing.value = false
+      if (generation === renamePreviewGeneration) isPreviewing.value = false
     }
+  }
+
+  function invalidateRenamePreview() {
+    renamePreviewGeneration += 1
+    renamePreview.value = []
+    isPreviewing.value = false
   }
 
   function referenceStem(id: string) {
@@ -226,10 +260,12 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
     addReferences,
     removeReference,
     addTargetRoots,
+    setActiveReference,
     search,
     cancel,
     toggleSelected,
     selectFiltered,
+    deselectFiltered,
     clearSelection,
     reorderSelected,
     generateRenamePreview,
@@ -241,6 +277,11 @@ export const useDifferenceFinderStore = defineStore('difference-finder', () => {
 
 function normalizePath(path: string) {
   return path.replace(/\//g, '\\').toLowerCase()
+}
+
+function samePaths(left: string[], right: string[]) {
+  return left.length === right.length
+    && left.every((path, index) => normalizePath(path) === normalizePath(right[index]))
 }
 
 function fileName(path: string) {

@@ -79,10 +79,10 @@
           <small>{{ item.width }} × {{ item.height }} · {{ formatBytes(item.fileSize) }} · {{ item.format.toUpperCase() }}</small>
         </div>
         <div class="match-cell" role="cell">
-          <el-tag :type="classificationType(store.classificationForItem(item))" size="small">
-            {{ classificationLabel(store.classificationForItem(item)) }}
+          <el-tag :type="classificationType(effectiveRelation(item).classification)" size="small">
+            {{ classificationLabel(effectiveRelation(item).classification) }}
           </el-tag>
-          <span>{{ store.referenceStem(item.bestReferenceId) }} · {{ similarityFor(item) }}</span>
+          <span>{{ store.referenceStem(effectiveRelation(item).referenceId) }} · {{ similarityFor(item) }}</span>
         </div>
         <div class="name-cell" role="cell">
           <el-input
@@ -184,8 +184,9 @@
         <el-button v-if="lastBatch?.reversible" :disabled="busy || store.isRunning" @click="undoLast">撤销上次操作</el-button>
         <el-button
           type="primary"
+          data-test="execute-rename"
           :loading="busy"
-          :disabled="store.isRunning || blockingCount > 0 || !renameReady"
+          :disabled="store.isRunning || store.isPreviewing || blockingCount > 0 || !renameReady"
           @click="executeRename"
         >
           执行重命名
@@ -243,6 +244,7 @@ const appliedRule = ref<RenameRule>({ mode: 'simple', template: '$name.$ext' })
 const expandedTools = ref<string[]>([])
 const preview = ref<DifferenceMatchItem | null>(null)
 let validationTimer: number | null = null
+let manualValidationGeneration = 0
 
 const variables = [
   { token: '$name', label: '原名称' }, { token: '$ext', label: '扩展名' },
@@ -260,12 +262,16 @@ const classifications: Array<{ value: MatchClassification; label: string }> = [
 
 const referenceFilter = computed({
   get: () => store.activeReferenceId || 'all',
-  set: (value: string) => { store.activeReferenceId = value === 'all' ? null : value }
+  set: (value: string) => { store.setActiveReference(value === 'all' ? null : value) }
 })
 const displayRows = computed(() => manualPreview.value.length ? manualPreview.value : store.renamePreview)
 const previewRows = computed(() => new Map(displayRows.value.map(item => [normalizePath(item.sourcePath), item])))
 const blockingCount = computed(() => displayRows.value.filter(item => item.blocking).length)
-const renameReady = computed(() => displayRows.value.length === store.orderedSelectedMatches.length)
+const renameReady = computed(() => {
+  const previewSources = displayRows.value.map(item => normalizePath(item.sourcePath)).sort()
+  const selectedSources = store.orderedSelectedMatches.map(item => normalizePath(item.filePath)).sort()
+  return previewSources.length > 0 && previewSources.join('|') === selectedSources.join('|')
+})
 const visibleSelectedCount = computed(() => store.filteredMatches.filter(item => isSelected(item.filePath)).length)
 const allVisibleSelected = computed(() => store.filteredMatches.length > 0 && visibleSelectedCount.value === store.filteredMatches.length)
 const someVisibleSelected = computed(() => visibleSelectedCount.value > 0)
@@ -282,12 +288,13 @@ watch(() => store.renamePreview, rows => {
 }, { deep: true })
 
 watch(
-  () => store.orderedSelectedMatches
+  () => `${store.activeReferenceId || ''}::${store.orderedSelectedMatches
     .map(item => normalizePath(item.filePath))
     .sort()
-    .join('|'),
-  async signature => {
-    if (!signature) {
+    .join('|')}`,
+  async () => {
+    manualValidationGeneration += 1
+    if (!store.orderedSelectedMatches.length) {
       hasAppliedRule.value = false
       store.renamePreview = []
       manualPreview.value = []
@@ -334,7 +341,7 @@ function isSelected(path: string) {
 
 function toggleAllVisible(value: boolean | string | number) {
   if (Boolean(value)) store.selectFiltered()
-  else store.clearSelection()
+  else store.deselectFiltered()
 }
 
 function previewFor(path: string) {
@@ -360,12 +367,14 @@ function updateName(path: string, value: string | number) {
 
 async function validateManualNames() {
   if (!displayRows.value.length) return []
-  manualPreview.value = await previewDifferenceExplicitRename(displayRows.value.map(item => ({
+  const generation = ++manualValidationGeneration
+  const renamePreview = await previewDifferenceExplicitRename(displayRows.value.map(item => ({
     sourcePath: item.sourcePath,
     newName: editableNames.value[item.sourcePath] ?? item.proposedName,
     expectedFingerprint: fingerprintFor(item.sourcePath)
   })))
-  return manualPreview.value
+  if (generation === manualValidationGeneration) manualPreview.value = renamePreview
+  return renamePreview
 }
 
 async function executeRename() {
@@ -505,8 +514,16 @@ function classificationType(value: MatchClassification) {
 }
 
 function similarityFor(item: DifferenceMatchItem) {
-  const relation = item.relations.find(value => value.referenceId === item.bestReferenceId) || item.relations[0]
+  const relation = effectiveRelation(item)
   return relation?.similarity == null ? '—' : formatSsim(relation.similarity)
+}
+
+function effectiveRelation(item: DifferenceMatchItem) {
+  return (store.activeReferenceId
+    ? item.relations.find(relation => relation.referenceId === store.activeReferenceId)
+    : undefined)
+    || item.relations.find(relation => relation.referenceId === item.bestReferenceId)
+    || item.relations[0]
 }
 
 function formatBytes(value: number) {

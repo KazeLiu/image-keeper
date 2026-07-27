@@ -18,7 +18,7 @@ const SearchSetupPanelStub = defineComponent({
 
 const BatchRenameGridStub = defineComponent({
   name: 'BatchRenameGrid',
-  template: '<div data-test="file-table">文件表格</div>'
+  template: '<div data-test="file-table">文件表格<input data-test="rename-draft" /></div>'
 })
 
 function mountView() {
@@ -41,7 +41,7 @@ describe('DifferenceFinderView two-step workflow', () => {
 
     expect(wrapper.get('[data-test="reference-setup"]').exists()).toBe(true)
     expect(wrapper.get('[data-test="complete-search"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="file-table"]').exists()).toBe(false)
+    expect(wrapper.get('.results-stage').attributes('style')).toContain('display: none')
     expect(wrapper.get('[data-test="step-setup"]').attributes('aria-current')).toBe('step')
   })
 
@@ -50,13 +50,24 @@ describe('DifferenceFinderView two-step workflow', () => {
 
     await wrapper.get('[data-test="complete-search"]').trigger('click')
 
-    expect(wrapper.find('[data-test="reference-setup"]').exists()).toBe(false)
+    expect(wrapper.get('.setup-stage').attributes('style')).toContain('display: none')
     expect(wrapper.get('[data-test="file-table"]').exists()).toBe(true)
     expect(wrapper.get('[data-test="step-results"]').attributes('aria-current')).toBe('step')
 
     await wrapper.get('[data-test="edit-search"]').trigger('click')
 
     expect(wrapper.get('[data-test="reference-setup"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="file-table"]').exists()).toBe(false)
+    expect(wrapper.get('.results-stage').attributes('style')).toContain('display: none')
+  })
+
+  it('preserves rename drafts while returning to edit search inputs', async () => {
+    const wrapper = mountView()
+
+    await wrapper.get('[data-test="complete-search"]').trigger('click')
+    await wrapper.get('[data-test="rename-draft"]').setValue('kept-name.jpg')
+    await wrapper.get('[data-test="edit-search"]').trigger('click')
+    await wrapper.get('[data-test="complete-search"]').trigger('click')
+
+    expect((wrapper.get('[data-test="rename-draft"]').element as HTMLInputElement).value).toBe('kept-name.jpg')
   })
 })

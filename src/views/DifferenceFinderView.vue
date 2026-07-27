@@ -30,20 +30,20 @@
     </header>
 
     <main class="finder-main">
-      <section v-if="currentStep === 'setup'" class="setup-stage" aria-label="第一步：选择查找范围">
+      <section v-show="currentStep === 'setup'" class="setup-stage" aria-label="第一步：选择查找范围">
         <div class="setup-grid">
           <ReferenceImageStrip />
           <SearchSetupPanel @search-complete="showResults" />
         </div>
       </section>
 
-      <section v-else class="results-stage" aria-label="第二步：选择并整理文件">
+      <section v-show="currentStep === 'results'" class="results-stage" aria-label="第二步：选择并整理文件">
         <div class="results-heading">
           <div>
             <h2>查找结果</h2>
             <p>共找到 {{ store.matches.length }} 个相关文件</p>
           </div>
-          <el-button data-test="edit-search" :icon="ArrowLeft" @click="currentStep = 'setup'">
+          <el-button data-test="edit-search" :icon="ArrowLeft" @click="editSearch">
             重新选择
           </el-button>
         </div>
@@ -65,8 +65,13 @@ const store = useDifferenceFinderStore()
 const currentStep = ref<'setup' | 'results'>('setup')
 
 function showResults() {
-  store.activeReferenceId = null
+  store.setActiveReference(null)
   currentStep.value = 'results'
+}
+
+function editSearch() {
+  store.progress = null
+  currentStep.value = 'setup'
 }
 </script>
 

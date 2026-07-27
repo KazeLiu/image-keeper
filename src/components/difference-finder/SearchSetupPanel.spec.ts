@@ -25,4 +25,21 @@ describe('SearchSetupPanel', () => {
     expect(store.search).toHaveBeenCalledTimes(1)
     expect(wrapper.emitted('searchComplete')).toHaveLength(1)
   })
+
+  it('stays on setup when the search fails', async () => {
+    const pinia = createPinia()
+    const wrapper = mount(SearchSetupPanel, {
+      global: { plugins: [pinia, ElementPlus] }
+    })
+    const store = useDifferenceFinderStore(pinia)
+    store.references = [{ id: 'ref-1', name: 'ref.png', path: 'C:\\ref.png' }]
+    store.targetRoots = ['C:\\images']
+    vi.spyOn(store, 'search').mockRejectedValue(new Error('scan failed'))
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('[data-test="start-search"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('searchComplete')).toBeUndefined()
+  })
 })

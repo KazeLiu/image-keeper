@@ -54,6 +54,17 @@ function match(fileName: string): DifferenceMatchItem {
   }
 }
 
+function renamePreview(item: DifferenceMatchItem) {
+  return {
+    sourcePath: item.filePath,
+    originalName: item.fileName,
+    proposedName: item.fileName,
+    targetPath: item.filePath,
+    issues: [],
+    blocking: false
+  }
+}
+
 describe('BatchRenameGrid unified file table', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -78,5 +89,76 @@ describe('BatchRenameGrid unified file table', () => {
     expect(store.selectedPaths).toEqual(['C:\\images\\first.jpg'])
     expect(apiMocks.previewDifferenceRename).toHaveBeenCalledTimes(1)
     expect(apiMocks.previewDifferenceRename.mock.calls[0][0]).toHaveLength(1)
+  })
+
+  it('shows the relation for the active reference filter', async () => {
+    const pinia = createPinia()
+    const store = useDifferenceFinderStore(pinia)
+    const item = match('first.jpg')
+    item.relations.push({
+      referenceId: 'ref-2',
+      referencePath: 'C:\\other.png',
+      classification: 'exact',
+      phashDistance: 0,
+      similarity: 0.88
+    })
+    store.references = [
+      { id: 'ref-1', name: 'primary.png', path: 'C:\\ref.png' },
+      { id: 'ref-2', name: 'other.png', path: 'C:\\other.png' }
+    ]
+    store.matches = [item]
+    store.orderedPaths = [item.filePath]
+    store.activeReferenceId = 'ref-2'
+
+    const wrapper = mount(BatchRenameGrid, {
+      global: { plugins: [pinia, ElementPlus] }
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.match-cell').text()).toContain('other · 0.88')
+    expect(wrapper.get('.match-cell').text()).not.toContain('primary')
+  })
+
+  it('refreshes selected rename previews when the reference filter changes', async () => {
+    const pinia = createPinia()
+    const store = useDifferenceFinderStore(pinia)
+    const item = match('first.jpg')
+    item.relations.push({
+      referenceId: 'ref-2', referencePath: 'C:\\other.png', classification: 'variant', phashDistance: 3, similarity: 0.9
+    })
+    store.references = [
+      { id: 'ref-1', name: 'primary.png', path: 'C:\\ref.png' },
+      { id: 'ref-2', name: 'other.png', path: 'C:\\other.png' }
+    ]
+    store.matches = [item]
+    store.orderedPaths = [item.filePath]
+    store.selectedPaths = [item.filePath]
+
+    mount(BatchRenameGrid, { global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+    expect(apiMocks.previewDifferenceRename).toHaveBeenCalledTimes(1)
+
+    store.activeReferenceId = 'ref-2'
+    await flushPromises()
+
+    expect(apiMocks.previewDifferenceRename).toHaveBeenCalledTimes(2)
+  })
+
+  it('disables execution while the latest rename preview is pending', async () => {
+    const pinia = createPinia()
+    const store = useDifferenceFinderStore(pinia)
+    const item = match('first.jpg')
+    store.references = [{ id: 'ref-1', name: 'ref.png', path: 'C:\\ref.png' }]
+    store.matches = [item]
+    store.orderedPaths = [item.filePath]
+    store.selectedPaths = [item.filePath]
+    store.renamePreview = [renamePreview(item)]
+
+    const wrapper = mount(BatchRenameGrid, { global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+    store.isPreviewing = true
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('[data-test="execute-rename"]').attributes('disabled')).toBeDefined()
   })
 })
