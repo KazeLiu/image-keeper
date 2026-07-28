@@ -486,9 +486,18 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Loading, QuestionFilled, Setting } from '@element-plus/icons-vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { batchRecycleImages, getGroupSimilarityScores } from '@/api/comparison'
+import {
+  batchRecycleImages,
+  getGroupSimilarityScores,
+  startGroupSimilarityBackfill
+} from '@/api/comparison'
 import { useComparisonStore } from '@/stores/comparisonStore'
-import type { ComparisonGroupMember, GroupSimilarityProgress, GroupSimilarityScore } from '@/types'
+import type {
+  ComparisonGroup,
+  ComparisonGroupMember,
+  GroupSimilarityProgress,
+  GroupSimilarityScore
+} from '@/types'
 import {
   formatSsim,
   parseStoredRecognitionThreshold,
@@ -503,7 +512,6 @@ const candidateSsimColumnHelp = '候选图与当前所在行原图的标准 SSIM
 const originalBasisColumnHelp = '说明图片为何被列为原图。自动识别会综合分辨率、画面比例和原图拆分阈值；手动设置优先。'
 const ORIGINAL_RECOGNITION_THRESHOLD_KEY = 'imagekeeper:original-recognition-ssim'
 const LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
-const GROUP_SCORE_CACHE_LIMIT = 30
 
 type OriginalRowSource = 'auto' | 'manual' | 'fallback'
 
@@ -534,12 +542,12 @@ const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
 const showEmptyOriginalRows = ref(false)
 const groupSimilarityScores = ref<GroupSimilarityScore[]>([])
-const groupSimilarityScoreCache = new Map<string, GroupSimilarityScore[]>()
 const crossCheckProgress = ref<GroupSimilarityProgress | null>(null)
 const isLoadingCrossCheck = ref(false)
 const hasManualAssignmentChanges = ref(false)
 let crossCheckRequestId = 0
 let activeCrossCheckRequestKey = ''
+let lastLoadedGroupKey = ''
 let unlistenGroupSimilarityProgress: UnlistenFn | null = null
 let groupSimilarityProgressListenerPromise: Promise<void> | null = null
 
@@ -564,7 +572,13 @@ const originalRecognitionSliderValue = computed(() =>
 )
 
 const groupKey = computed(() =>
-  `${group.value?.group_index || ''}:${group.value?.members.map((member) => member.image_id).join(',') || ''}`
+  [
+    store.currentRunId,
+    store.groupingDataRevision,
+    group.value?.group_index || '',
+    group.value?.source_group_indices?.join(',') || '',
+    group.value?.members.map((member) => member.image_id).join(',') || ''
+  ].join(':')
 )
 
 const originalRows = computed(() => buildOriginalRows(group.value?.members || []))
@@ -671,8 +685,15 @@ const viewerMember = computed(() => {
 })
 
 watch(
-  groupKey,
-  () => {
+  [groupKey, () => store.isRefreshingGroups],
+  ([nextGroupKey, isRefreshing]) => {
+    if (isRefreshing) {
+      crossCheckRequestId += 1
+      isLoadingCrossCheck.value = false
+      return
+    }
+    if (nextGroupKey === lastLoadedGroupKey) return
+    lastLoadedGroupKey = nextGroupKey
     viewerIndex.value = 0
     manualOriginalIds.value = []
     manualThumbnailIds.value = []
@@ -919,18 +940,13 @@ async function loadGroupCrossCheckScores() {
   groupSimilarityScores.value = []
   crossCheckProgress.value = null
 
-  if (!currentGroup || !store.currentRunId || currentGroup.members.length < 2) {
+  if (!currentGroup || !store.currentRunId) {
     isLoadingCrossCheck.value = false
     return
   }
-  const scoreCacheKey = getGroupScoreCacheKey(
-    store.currentRunId,
-    currentGroup.members
-  )
-  const cachedScores = groupSimilarityScoreCache.get(scoreCacheKey)
-  if (cachedScores) {
-    groupSimilarityScores.value = cachedScores
+  if (currentGroup.members.length < 2) {
     isLoadingCrossCheck.value = false
+    scheduleGroupSimilarityBackfill(currentGroup)
     return
   }
 
@@ -944,7 +960,7 @@ async function loadGroupCrossCheckScores() {
     )
     if (requestId === crossCheckRequestId) {
       groupSimilarityScores.value = scores
-      rememberGroupSimilarityScores(scoreCacheKey, scores)
+      scheduleGroupSimilarityBackfill(currentGroup)
     }
   } catch (error) {
     if (requestId === crossCheckRequestId) {
@@ -958,31 +974,18 @@ async function loadGroupCrossCheckScores() {
   }
 }
 
-function getGroupScoreCacheKey(runId: string, members: ComparisonGroupMember[]) {
-  const memberKeys = members
-    .map((member) => [
-      member.image_id,
-      member.file_path,
-      member.file_size,
-      member.width,
-      member.height,
-      member.phash || ''
-    ].join('|'))
-    .sort()
-    .join(';')
-  return `${runId}:standard-ssim:${memberKeys}`
-}
-
-function rememberGroupSimilarityScores(cacheKey: string, scores: GroupSimilarityScore[]) {
-  if (groupSimilarityScoreCache.has(cacheKey)) {
-    groupSimilarityScoreCache.delete(cacheKey)
-  }
-  groupSimilarityScoreCache.set(cacheKey, scores)
-  while (groupSimilarityScoreCache.size > GROUP_SCORE_CACHE_LIMIT) {
-    const oldestKey = groupSimilarityScoreCache.keys().next().value
-    if (!oldestKey) break
-    groupSimilarityScoreCache.delete(oldestKey)
-  }
+function scheduleGroupSimilarityBackfill(currentGroup: ComparisonGroup) {
+  if (!store.currentRunId) return
+  const sourceGroupIndices = currentGroup.source_group_indices?.length
+    ? currentGroup.source_group_indices
+    : [currentGroup.group_index]
+  void startGroupSimilarityBackfill(
+    store.currentRunId,
+    store.appliedGroupingDistance,
+    sourceGroupIndices
+  ).catch((error) => {
+    console.warn('启动后台组内相似度预计算失败:', error)
+  })
 }
 
 async function recalculateImageAssignment() {

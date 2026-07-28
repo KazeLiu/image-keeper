@@ -1,11 +1,12 @@
 use crate::core::algorithm_profile::{
-    algorithm_pool, ALGORITHM_WORKER_COUNT, CURRENT_ALGORITHM_PROFILE_ID,
+    algorithm_pool, background_algorithm_pool, ALGORITHM_WORKER_COUNT, CURRENT_ALGORITHM_PROFILE_ID,
 };
 use crate::db::models::{AnalysisType, ComparisonStats, RunStatus};
 use crate::db::repository::{Repository, RunConfig};
 use crate::error::{AppError, Result};
 use chrono::Utc;
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadPool};
+use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -83,7 +84,7 @@ pub struct ComparisonResultRow {
 }
 
 /// 感知哈希粗分组
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComparisonGroup {
     pub group_index: usize,
     pub representative_image_id: i64,
@@ -94,7 +95,7 @@ pub struct ComparisonGroup {
 }
 
 /// 分组内图片行
-#[derive(Debug, serde::Serialize, Clone)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct ComparisonGroupMember {
     pub image_id: i64,
     pub file_path: String,
@@ -114,7 +115,7 @@ pub struct ComparisonGroupMember {
 }
 
 /// 当前分组内两两图片相似度。用于前端把缩略图挂到最像的原图下面。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GroupSimilarityScore {
     pub left_image_id: i64,
     pub right_image_id: i64,
@@ -165,20 +166,20 @@ struct GroupSimilarityCacheKey {
     right: SimilaritySourceFingerprint,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize)]
 struct GroupSimilarityResultCacheKey {
     run_id: String,
     algorithm_profile_id: String,
     members: Vec<GroupSimilarityResultCacheMember>,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 struct GroupSimilarityResultCacheMember {
     source: SimilaritySourceFingerprint,
     phash: Option<String>,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 struct SimilaritySourceFingerprint {
     image_id: i64,
     canonical_file_path: String,
@@ -232,7 +233,9 @@ const GROUP_SIMILARITY_ORIGINAL_FILE_RATIO: f64 = 0.75;
 const GROUP_SIMILARITY_LOWER_PIXEL_RATIO: f64 = 0.98;
 const GROUP_SIMILARITY_LOWER_FILE_RATIO: f64 = 0.98;
 const GROUP_SIMILARITY_RESULT_CACHE_LIMIT: usize = 50;
+const GROUP_SIMILARITY_PAIR_CACHE_LIMIT: usize = 4096;
 const GROUP_SIMILARITY_IMAGE_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
+const DEFAULT_REVIEW_GROUPING_DISTANCE: i32 = 10;
 
 static GROUP_SIMILARITY_CACHE: OnceLock<
     Mutex<HashMap<GroupSimilarityCacheKey, GroupSimilarityScore>>,
@@ -322,6 +325,14 @@ fn delete_comparison_run_records(repo: &Repository, run_id: &str) -> Result<()> 
     }
 
     repo.conn().execute(
+        "DELETE FROM comparison_group_similarity_cache WHERE run_id = ?1",
+        [run_id],
+    )?;
+    repo.conn().execute(
+        "DELETE FROM comparison_group_cache WHERE run_id = ?1",
+        [run_id],
+    )?;
+    repo.conn().execute(
         r#"DELETE FROM review_status
            WHERE analysis_result_id IN (
                SELECT id FROM analysis_results WHERE run_id = ?1
@@ -340,6 +351,7 @@ fn delete_comparison_run_records(repo: &Repository, run_id: &str) -> Result<()> 
         .execute("DELETE FROM folders WHERE run_id = ?1", [run_id])?;
     repo.conn()
         .execute("DELETE FROM runs WHERE run_id = ?1", [run_id])?;
+    clear_group_similarity_memory_cache_for_run(run_id);
 
     Ok(())
 }
@@ -473,6 +485,126 @@ fn read_completed_images(repo: &Repository, run_id: &str) -> Result<Vec<ImageSum
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     Ok(images)
+}
+
+fn read_group_cache_context(repo: &Repository, run_id: &str) -> Result<GroupCacheContext> {
+    let source_image_count = repo.conn().query_row(
+        r#"SELECT COUNT(*)
+           FROM images
+           WHERE run_id = ?1
+             AND scan_status = 'completed'
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM analysis_results ar
+                 WHERE ar.run_id = images.run_id
+                   AND ar.comparison_image_id = images.id
+                   AND COALESCE((
+                       SELECT ol.operation_type
+                       FROM operation_logs ol
+                       WHERE ol.analysis_result_id = ar.id
+                       ORDER BY ol.created_at DESC, ol.id DESC
+                       LIMIT 1
+                   ), 'none') IN ('recycled', 'permanently_deleted')
+             )"#,
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let operation_revision = repo.conn().query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM operation_logs WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+
+    Ok(GroupCacheContext {
+        source_image_count,
+        operation_revision,
+    })
+}
+
+fn read_cached_comparison_groups(
+    repo: &Repository,
+    run_id: &str,
+    grouping_distance: i32,
+    context: GroupCacheContext,
+) -> Result<Option<Vec<ComparisonGroup>>> {
+    let groups_json = repo
+        .conn()
+        .query_row(
+            r#"SELECT groups_json
+               FROM comparison_group_cache
+               WHERE run_id = ?1
+                 AND algorithm_profile_id = ?2
+                 AND grouping_distance = ?3
+                 AND source_image_count = ?4
+                 AND operation_revision = ?5"#,
+            params![
+                run_id,
+                CURRENT_ALGORITHM_PROFILE_ID,
+                grouping_distance,
+                context.source_image_count,
+                context.operation_revision,
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(groups_json) = groups_json else {
+        return Ok(None);
+    };
+    let groups: Vec<ComparisonGroup> = match serde_json::from_str(&groups_json) {
+        Ok(groups) => groups,
+        Err(_) => return Ok(None),
+    };
+    let member_count = groups
+        .iter()
+        .map(|group| group.members.len() as i64)
+        .sum::<i64>();
+    let unique_member_count = groups
+        .iter()
+        .flat_map(|group| group.members.iter().map(|member| member.image_id))
+        .collect::<HashSet<_>>()
+        .len() as i64;
+    let member_counts_match = groups
+        .iter()
+        .all(|group| group.member_count == group.members.len());
+    if member_count != context.source_image_count
+        || unique_member_count != member_count
+        || !member_counts_match
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(groups))
+}
+
+fn persist_comparison_groups(
+    repo: &Repository,
+    run_id: &str,
+    grouping_distance: i32,
+    context: GroupCacheContext,
+    groups: &[ComparisonGroup],
+) -> Result<()> {
+    let groups_json = serde_json::to_string(groups)?;
+    repo.conn().execute(
+        r#"INSERT INTO comparison_group_cache (
+               run_id, algorithm_profile_id, grouping_distance,
+               source_image_count, operation_revision, groups_json, computed_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT(run_id, algorithm_profile_id, grouping_distance) DO UPDATE SET
+               source_image_count = excluded.source_image_count,
+               operation_revision = excluded.operation_revision,
+               groups_json = excluded.groups_json,
+               computed_at = excluded.computed_at"#,
+        params![
+            run_id,
+            CURRENT_ALGORITHM_PROFILE_ID,
+            grouping_distance,
+            context.source_image_count,
+            context.operation_revision,
+            groups_json,
+            Utc::now().timestamp(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn read_images_by_ids(
@@ -637,6 +769,33 @@ fn refresh_current_file_fingerprints(images: &mut [ImageSummary]) -> Result<()> 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroupCacheContext {
+    source_image_count: i64,
+    operation_revision: i64,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct GroupSimilarityBackfillKey {
+    run_id: String,
+    grouping_distance: i32,
+}
+
+#[derive(Default)]
+pub struct GroupSimilarityBackfillState {
+    active_jobs: Mutex<HashSet<GroupSimilarityBackfillKey>>,
+}
+
+impl GroupSimilarityBackfillState {
+    fn try_start(&self, key: GroupSimilarityBackfillKey) -> bool {
+        self.active_jobs.lock().unwrap().insert(key)
+    }
+
+    fn finish(&self, key: &GroupSimilarityBackfillKey) {
+        self.active_jobs.lock().unwrap().remove(key);
+    }
+}
+
 fn validate_current_file_fingerprints(images: &[ImageSummary]) -> Result<()> {
     for image in images {
         let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
@@ -770,6 +929,12 @@ fn read_comparison_groups(
     let active_grouping_distance = grouping_distance
         .unwrap_or(run.phash_max_distance)
         .clamp(0, 24);
+    let cache_context = read_group_cache_context(repo, run_id)?;
+    if let Some(groups) =
+        read_cached_comparison_groups(repo, run_id, active_grouping_distance, cache_context)?
+    {
+        return Ok(groups);
+    }
     let images = read_completed_images(repo, run_id)?;
     let analysis_by_image_id = read_analysis_summaries(repo, run_id)?;
     let image_by_id: HashMap<i64, ImageSummary> = images
@@ -778,6 +943,7 @@ fn read_comparison_groups(
         .collect();
 
     if images.is_empty() {
+        persist_comparison_groups(repo, run_id, active_grouping_distance, cache_context, &[])?;
         return Ok(Vec::new());
     }
 
@@ -823,7 +989,7 @@ fn read_comparison_groups(
             .then(left[0].relative_path.cmp(&right[0].relative_path))
     });
 
-    let groups = raw_groups
+    let groups: Vec<ComparisonGroup> = raw_groups
         .into_iter()
         .enumerate()
         .map(|(group_index, group_images)| {
@@ -855,6 +1021,13 @@ fn read_comparison_groups(
         })
         .collect();
 
+    persist_comparison_groups(
+        repo,
+        run_id,
+        active_grouping_distance,
+        cache_context,
+        &groups,
+    )?;
     Ok(groups)
 }
 
@@ -871,6 +1044,61 @@ fn group_similarity_result_cache(
 fn group_similarity_image_cache(
 ) -> &'static Mutex<HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>> {
     GROUP_SIMILARITY_IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn insert_group_similarity_result_cache_entry(
+    cache: &mut HashMap<GroupSimilarityResultCacheKey, Vec<GroupSimilarityScore>>,
+    cache_key: GroupSimilarityResultCacheKey,
+    scores: Vec<GroupSimilarityScore>,
+    limit: usize,
+) {
+    cache.insert(cache_key.clone(), scores);
+    while cache.len() > limit {
+        let Some(eviction_key) = cache.keys().find(|key| *key != &cache_key).cloned() else {
+            break;
+        };
+        cache.remove(&eviction_key);
+    }
+}
+
+fn remember_group_similarity_result(
+    cache_key: GroupSimilarityResultCacheKey,
+    scores: Vec<GroupSimilarityScore>,
+) {
+    let mut cache = group_similarity_result_cache().lock().unwrap();
+    insert_group_similarity_result_cache_entry(
+        &mut cache,
+        cache_key,
+        scores,
+        GROUP_SIMILARITY_RESULT_CACHE_LIMIT,
+    );
+}
+
+fn clear_group_similarity_memory_cache_for_run(run_id: &str) {
+    group_similarity_cache()
+        .lock()
+        .unwrap()
+        .retain(|key, _| key.run_id != run_id);
+    group_similarity_result_cache()
+        .lock()
+        .unwrap()
+        .retain(|key, _| key.run_id != run_id);
+    group_similarity_image_cache()
+        .lock()
+        .unwrap()
+        .retain(|key, _| key.run_id != run_id);
+}
+
+fn clear_group_similarity_memory_cache_if_run_missing(
+    repo: &Arc<Mutex<Repository>>,
+    run_id: &str,
+) -> Result<bool> {
+    let repo_lock = repo.lock().unwrap();
+    if repo_lock.get_run(run_id)?.is_some() {
+        return Ok(false);
+    }
+    clear_group_similarity_memory_cache_for_run(run_id);
+    Ok(true)
 }
 
 fn similarity_image_cache_bytes(
@@ -945,6 +1173,88 @@ fn group_similarity_result_cache_key(
         algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
         members,
     }
+}
+
+fn group_similarity_member_signature(key: &GroupSimilarityResultCacheKey) -> Result<String> {
+    let serialized_members = serde_json::to_vec(&key.members)?;
+    Ok(blake3::hash(&serialized_members).to_hex().to_string())
+}
+
+fn read_persisted_group_similarity_scores(
+    repo: &Repository,
+    key: &GroupSimilarityResultCacheKey,
+) -> Result<Option<Vec<GroupSimilarityScore>>> {
+    let member_signature = group_similarity_member_signature(key)?;
+    let scores_json = repo
+        .conn()
+        .query_row(
+            r#"SELECT scores_json
+               FROM comparison_group_similarity_cache
+               WHERE run_id = ?1
+                 AND algorithm_profile_id = ?2
+                 AND member_signature = ?3"#,
+            params![key.run_id, key.algorithm_profile_id, member_signature],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    let Some(scores_json) = scores_json else {
+        return Ok(None);
+    };
+    let scores: Vec<GroupSimilarityScore> = match serde_json::from_str(&scores_json) {
+        Ok(scores) => scores,
+        Err(_) => return Ok(None),
+    };
+    let member_ids = key
+        .members
+        .iter()
+        .map(|member| member.source.image_id)
+        .collect::<HashSet<_>>();
+    let mut pair_ids = HashSet::new();
+    let valid = scores.iter().all(|score| {
+        let mut pair = [score.left_image_id, score.right_image_id];
+        pair.sort();
+        score.left_image_id != score.right_image_id
+            && member_ids.contains(&score.left_image_id)
+            && member_ids.contains(&score.right_image_id)
+            && score.ssim_score.is_some()
+            && score.error_message.is_none()
+            && pair_ids.insert((pair[0], pair[1]))
+    });
+
+    Ok(valid.then_some(scores))
+}
+
+fn persist_group_similarity_scores(
+    repo: &Repository,
+    key: &GroupSimilarityResultCacheKey,
+    scores: &[GroupSimilarityScore],
+) -> Result<()> {
+    if scores
+        .iter()
+        .any(|score| score.ssim_score.is_none() || score.error_message.is_some())
+    {
+        return Ok(());
+    }
+
+    let member_signature = group_similarity_member_signature(key)?;
+    let scores_json = serde_json::to_string(scores)?;
+    repo.conn().execute(
+        r#"INSERT INTO comparison_group_similarity_cache (
+               run_id, algorithm_profile_id, member_signature, scores_json, computed_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(run_id, algorithm_profile_id, member_signature) DO UPDATE SET
+               scores_json = excluded.scores_json,
+               computed_at = excluded.computed_at"#,
+        params![
+            key.run_id,
+            key.algorithm_profile_id,
+            member_signature,
+            scores_json,
+            Utc::now().timestamp(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn similarity_image_cache_key(
@@ -1255,11 +1565,13 @@ fn compute_group_similarity_pair(
     }
 }
 
-fn compute_group_similarity_scores(
+fn compute_group_similarity_scores_with_cache_policy(
     run_id: &str,
     images: &[ImageSummary],
     request_id: &str,
     window: Option<&Window>,
+    pool: &ThreadPool,
+    retain_computed_results_in_memory: bool,
 ) -> Result<Vec<GroupSimilarityScore>> {
     let mut current_images = images.to_vec();
     refresh_current_file_fingerprints(&mut current_images)?;
@@ -1349,7 +1661,7 @@ fn compute_group_similarity_scores(
 
     let processed_cache_images = AtomicUsize::new(0);
     let image_cache_hits = AtomicUsize::new(0);
-    algorithm_pool().install(|| {
+    pool.install(|| {
         image_cache_jobs.par_iter().for_each(|job| {
             let image = &images[job.image_index];
             let was_cached =
@@ -1392,7 +1704,7 @@ fn compute_group_similarity_scores(
     let computed_pairs = AtomicUsize::new(0);
     let progress_window = window.cloned();
 
-    let scores = algorithm_pool().install(|| {
+    let scores = pool.install(|| {
         plan.par_iter()
             .map(|pair| {
                 let left = &images[pair.left_index];
@@ -1486,7 +1798,7 @@ fn compute_group_similarity_scores(
     });
 
     validate_current_file_fingerprints(images)?;
-    {
+    if retain_computed_results_in_memory {
         let mut pair_cache = group_similarity_cache().lock().unwrap();
         for (pair, score) in plan.iter().zip(&scores) {
             let left = &images[pair.left_index];
@@ -1496,18 +1808,14 @@ fn compute_group_similarity_scores(
                 score.clone(),
             );
         }
-    }
-
-    let mut result_cache = group_similarity_result_cache().lock().unwrap();
-    result_cache.insert(result_cache_key.clone(), scores.clone());
-    if result_cache.len() > GROUP_SIMILARITY_RESULT_CACHE_LIMIT {
-        if let Some(oldest_key) = result_cache
-            .keys()
-            .find(|key| *key != &result_cache_key)
-            .cloned()
-        {
-            result_cache.remove(&oldest_key);
+        while pair_cache.len() > GROUP_SIMILARITY_PAIR_CACHE_LIMIT {
+            let Some(eviction_key) = pair_cache.keys().next().cloned() else {
+                break;
+            };
+            pair_cache.remove(&eviction_key);
         }
+        drop(pair_cache);
+        remember_group_similarity_result(result_cache_key.clone(), scores.clone());
     }
 
     if let Some(window) = window {
@@ -1533,6 +1841,130 @@ fn compute_group_similarity_scores(
     }
 
     Ok(scores)
+}
+
+fn compute_persisted_group_similarity_scores(
+    repo: &Arc<Mutex<Repository>>,
+    run_id: &str,
+    images: &[ImageSummary],
+    request_id: &str,
+    window: Option<&Window>,
+    pool: &ThreadPool,
+    retain_computed_results_in_memory: bool,
+) -> Result<Vec<GroupSimilarityScore>> {
+    let mut current_images = images.to_vec();
+    refresh_current_file_fingerprints(&mut current_images)?;
+    let result_cache_key = group_similarity_result_cache_key(run_id, &current_images);
+    let persisted_scores = {
+        let repo_lock = repo.lock().unwrap();
+        read_persisted_group_similarity_scores(&repo_lock, &result_cache_key)?
+    };
+    if let Some(scores) = persisted_scores {
+        if !retain_computed_results_in_memory {
+            return Ok(scores);
+        }
+        remember_group_similarity_result(result_cache_key.clone(), scores);
+    }
+
+    let scores = match compute_group_similarity_scores_with_cache_policy(
+        run_id,
+        &current_images,
+        request_id,
+        window,
+        pool,
+        retain_computed_results_in_memory,
+    ) {
+        Ok(scores) => scores,
+        Err(error) => {
+            clear_group_similarity_memory_cache_if_run_missing(repo, run_id)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_current_file_fingerprints(&current_images) {
+        clear_group_similarity_memory_cache_if_run_missing(repo, run_id)?;
+        return Err(error);
+    }
+    {
+        let repo_lock = repo.lock().unwrap();
+        if repo_lock.get_run(run_id)?.is_none() {
+            clear_group_similarity_memory_cache_for_run(run_id);
+            return Err(AppError::NotFound(format!("运行不存在: {run_id}")));
+        }
+        persist_group_similarity_scores(&repo_lock, &result_cache_key, &scores)?;
+    }
+    Ok(scores)
+}
+
+fn ordered_backfill_group_indices(
+    groups: &[ComparisonGroup],
+    after_group_indices: &[usize],
+) -> Vec<usize> {
+    let current_indices = after_group_indices.iter().copied().collect::<HashSet<_>>();
+    let after_group_index = current_indices.iter().copied().max().unwrap_or_default();
+    let excluded_indices = if current_indices.len() == 1 {
+        current_indices
+    } else {
+        HashSet::new()
+    };
+    groups
+        .iter()
+        .filter(|group| {
+            group.member_count >= 2
+                && group.group_index > after_group_index
+                && !excluded_indices.contains(&group.group_index)
+        })
+        .chain(groups.iter().filter(|group| {
+            group.member_count >= 2
+                && group.group_index <= after_group_index
+                && !excluded_indices.contains(&group.group_index)
+        }))
+        .map(|group| group.group_index)
+        .collect()
+}
+
+fn backfill_group_similarity_scores(
+    repo: &Arc<Mutex<Repository>>,
+    run_id: &str,
+    grouping_distance: i32,
+    after_group_indices: &[usize],
+) -> Result<()> {
+    let groups = {
+        let repo_lock = repo.lock().unwrap();
+        read_comparison_groups(&repo_lock, run_id, Some(grouping_distance))?
+    };
+    for group_index in ordered_backfill_group_indices(&groups, after_group_indices) {
+        let Some(group) = groups.iter().find(|group| group.group_index == group_index) else {
+            continue;
+        };
+        let image_ids = group
+            .members
+            .iter()
+            .map(|member| member.image_id)
+            .collect::<Vec<_>>();
+        let images = match {
+            let repo_lock = repo.lock().unwrap();
+            read_images_by_ids(&repo_lock, run_id, &image_ids)
+        } {
+            Ok(images) => images,
+            Err(error) => {
+                eprintln!("后台读取第 {group_index} 组失败: {error}");
+                continue;
+            }
+        };
+        let request_id = format!("background-{run_id}-{grouping_distance}-{group_index}");
+        if let Err(error) = compute_persisted_group_similarity_scores(
+            repo,
+            run_id,
+            &images,
+            &request_id,
+            None,
+            background_algorithm_pool(),
+            false,
+        ) {
+            eprintln!("后台预计算第 {group_index} 组失败: {error}");
+        }
+    }
+    Ok(())
 }
 
 fn compare_image_quality(left: &ImageSummary, right: &ImageSummary) -> std::cmp::Ordering {
@@ -1666,6 +2098,7 @@ pub async fn start_multi_compare(
             )
             .await;
 
+        let workflow_succeeded = result.is_ok();
         // 处理结果
         if let Err(e) = result {
             eprintln!("工作流执行失败: {:?}", e);
@@ -1673,6 +2106,25 @@ pub async fn start_multi_compare(
                 let repo_lock = repo_clone_outer.lock().unwrap();
                 repo_lock.update_run_status(&run_id_clone, RunStatus::Failed)
             };
+        }
+
+        if workflow_succeeded {
+            let grouping_repo = Arc::clone(&repo_clone_outer);
+            let grouping_run_id = run_id_clone.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                let repo_lock = grouping_repo.lock().unwrap();
+                read_comparison_groups(
+                    &repo_lock,
+                    &grouping_run_id,
+                    Some(DEFAULT_REVIEW_GROUPING_DISTANCE),
+                )
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => eprintln!("保存默认分组快照失败: {error}"),
+                Err(error) => eprintln!("默认分组快照任务异常结束: {error}"),
+            }
         }
 
         // 发送完成事件
@@ -1734,12 +2186,80 @@ pub async fn get_group_similarity_scores(
         ensure_current_algorithm_profile(&run.algorithm_profile_id)?;
         read_images_by_ids(&repo_lock, &run_id, &image_ids)?
     };
+    let repo = Arc::clone(repo.inner());
 
     tauri::async_runtime::spawn_blocking(move || {
-        compute_group_similarity_scores(&run_id, &images, &request_id, Some(&window))
+        compute_persisted_group_similarity_scores(
+            &repo,
+            &run_id,
+            &images,
+            &request_id,
+            Some(&window),
+            algorithm_pool(),
+            true,
+        )
     })
     .await
     .map_err(|error| AppError::Internal(format!("组内 SSIM 任务执行失败: {error}")))?
+}
+
+/// 当前组完成后，以单线程低优先级补算同一正式任务的其他分组。
+#[tauri::command]
+pub async fn start_group_similarity_backfill(
+    run_id: String,
+    grouping_distance: i32,
+    after_group_indices: Vec<usize>,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+    state: State<'_, Arc<GroupSimilarityBackfillState>>,
+) -> Result<()> {
+    if !(0..=24).contains(&grouping_distance) {
+        return Err(AppError::ValidationError(
+            "分组宽松度必须位于 0 到 24 之间".to_string(),
+        ));
+    }
+    if after_group_indices.is_empty() || after_group_indices.iter().any(|index| *index == 0) {
+        return Err(AppError::ValidationError(
+            "当前分组必须包含有效的原始组序号".to_string(),
+        ));
+    }
+    {
+        let repo_lock = repo.lock().unwrap();
+        let run = repo_lock
+            .get_run(&run_id)?
+            .ok_or_else(|| AppError::NotFound(format!("运行不存在: {run_id}")))?;
+        ensure_current_algorithm_profile(&run.algorithm_profile_id)?;
+    }
+
+    let key = GroupSimilarityBackfillKey {
+        run_id: run_id.clone(),
+        grouping_distance,
+    };
+    if !state.try_start(key.clone()) {
+        return Ok(());
+    }
+
+    let repo = Arc::clone(repo.inner());
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn(async move {
+        let backfill_repo = Arc::clone(&repo);
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            backfill_group_similarity_scores(
+                &backfill_repo,
+                &run_id,
+                grouping_distance,
+                &after_group_indices,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("后台组内相似度预计算失败: {error}"),
+            Err(error) => eprintln!("后台组内相似度任务异常结束: {error}"),
+        }
+        state.finish(&key);
+    });
+
+    Ok(())
 }
 
 /// 获取运行状态
@@ -2004,9 +2524,39 @@ mod tests {
         })
         .unwrap();
 
+        read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        let similarity_key = group_similarity_result_cache_key(
+            "run-1",
+            &[
+                image_summary_for_plan(1, "a.png", 10, 10, 100, "0000000000000000"),
+                image_summary_for_plan(2, "b.png", 10, 10, 90, "0000000000000001"),
+            ],
+        );
+        persist_group_similarity_scores(
+            &repo,
+            &similarity_key,
+            &[GroupSimilarityScore {
+                left_image_id: 1,
+                right_image_id: 2,
+                ssim_score: Some(0.998),
+                error_message: None,
+            }],
+        )
+        .unwrap();
+        repo.conn()
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+
         delete_comparison_run_records(&repo, "run-1").unwrap();
 
-        for table in ["runs", "folders", "images", "analysis_results"] {
+        for table in [
+            "runs",
+            "folders",
+            "images",
+            "analysis_results",
+            "comparison_group_cache",
+            "comparison_group_similarity_cache",
+        ] {
             let count: i64 = repo
                 .conn()
                 .query_row(
@@ -2219,6 +2769,191 @@ mod tests {
         assert_eq!(strict_groups[1].member_count, 1);
     }
 
+    fn insert_group_cache_test_image(
+        repo: &Repository,
+        folder_id: i64,
+        relative_path: &str,
+        phash: &str,
+    ) -> i64 {
+        use crate::db::models::FolderRole;
+        use crate::db::repository::ImageInsert;
+
+        let image_id = repo
+            .insert_image(&ImageInsert {
+                run_id: "run-1".to_string(),
+                folder_id,
+                source_role: FolderRole::Baseline,
+                file_path: format!("D:/baseline/{relative_path}"),
+                relative_path: relative_path.to_string(),
+                file_size: 100,
+                file_modified_at: 0,
+                width: 10,
+                height: 10,
+                format: "png".to_string(),
+                aspect_ratio: 1.0,
+                frame_count: 1,
+                frame_strategy: "first".to_string(),
+            })
+            .unwrap();
+        repo.update_image_hash(
+            image_id,
+            &format!("hash-{relative_path}"),
+            phash,
+            PHASH_ALGORITHM_VERSION,
+        )
+        .unwrap();
+        image_id
+    }
+
+    fn create_group_cache_test_repo() -> (Repository, i64) {
+        use crate::db::models::FolderRole;
+
+        let repo = create_test_repo();
+        let folder_id = repo
+            .create_folder("run-1", "D:/baseline", "A", FolderRole::Baseline)
+            .unwrap();
+        insert_group_cache_test_image(&repo, folder_id, "a.png", "0000000000000000");
+        insert_group_cache_test_image(&repo, folder_id, "b.png", "0000000000000001");
+        insert_group_cache_test_image(&repo, folder_id, "c.png", "ffffffffffffffff");
+        (repo, folder_id)
+    }
+
+    #[test]
+    fn comparison_group_cache_persists_the_first_grouping_snapshot() {
+        let (repo, _) = create_group_cache_test_repo();
+
+        let groups = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        let cache_count: i64 = repo
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM comparison_group_cache WHERE run_id = 'run-1' AND grouping_distance = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(cache_count, 1, "首次分组后应该保存一份正式任务快照");
+    }
+
+    #[test]
+    fn comparison_group_cache_reuses_the_snapshot_for_the_same_distance() {
+        let (repo, _) = create_group_cache_test_repo();
+        let first = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        repo.conn()
+            .execute(
+                "UPDATE images SET phash = 'ffffffffffffffff' WHERE run_id = 'run-1' AND relative_path = 'a.png'",
+                [],
+            )
+            .unwrap();
+
+        let second = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        let member_paths = |groups: &[ComparisonGroup]| {
+            groups[0]
+                .members
+                .iter()
+                .map(|member| member.relative_path.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            member_paths(&first),
+            vec!["a.png".to_string(), "b.png".to_string()]
+        );
+        assert_eq!(member_paths(&second), member_paths(&first));
+    }
+
+    #[test]
+    fn comparison_group_cache_isolated_by_grouping_distance() {
+        let (repo, _) = create_group_cache_test_repo();
+
+        read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        read_comparison_groups(&repo, "run-1", Some(0)).unwrap();
+        let cache_count: i64 = repo
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM comparison_group_cache WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(cache_count, 2);
+    }
+
+    #[test]
+    fn comparison_group_cache_rebuilds_when_the_source_image_count_changes() {
+        let (repo, folder_id) = create_group_cache_test_repo();
+        let first = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        insert_group_cache_test_image(&repo, folder_id, "d.png", "eeeeeeeeeeeeeeee");
+
+        let second = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        let cached_source_count: i64 = repo
+            .conn()
+            .query_row(
+                "SELECT source_image_count FROM comparison_group_cache WHERE run_id = 'run-1' AND grouping_distance = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first.iter().map(|group| group.member_count).sum::<usize>(),
+            3
+        );
+        assert_eq!(
+            second.iter().map(|group| group.member_count).sum::<usize>(),
+            4
+        );
+        assert_eq!(cached_source_count, 4);
+    }
+
+    #[test]
+    fn comparison_group_cache_rebuilds_when_the_operation_revision_changes() {
+        let (repo, _) = create_group_cache_test_repo();
+        let first = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        repo.conn()
+            .execute(
+                "UPDATE images SET phash = 'ffffffffffffffff' WHERE run_id = 'run-1' AND relative_path = 'a.png'",
+                [],
+            )
+            .unwrap();
+
+        // An operation log entry changes the formal task's eligible-image revision.
+        repo.conn()
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        repo.conn()
+            .execute(
+                r#"INSERT INTO operation_logs (
+                       run_id, analysis_result_id, operation_type, source_path, created_at
+                   ) VALUES ('run-1', 999, 'restored', 'D:/baseline/a.png', 1)"#,
+                [],
+            )
+            .unwrap();
+        repo.conn()
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .unwrap();
+
+        let second = read_comparison_groups(&repo, "run-1", Some(10)).unwrap();
+        let first_group_paths = |groups: &[ComparisonGroup]| {
+            groups[0]
+                .members
+                .iter()
+                .map(|member| member.relative_path.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            first_group_paths(&first),
+            vec!["a.png".to_string(), "b.png".to_string()]
+        );
+        assert_eq!(
+            first_group_paths(&second),
+            vec!["a.png".to_string(), "c.png".to_string()]
+        );
+    }
+
     fn image_summary_for_plan(
         id: i64,
         relative_path: &str,
@@ -2354,6 +3089,321 @@ mod tests {
         assert_ne!(first_pair_key, second_pair_key);
         assert_ne!(first_result_key, second_result_key);
         assert_ne!(first_image_key, second_image_key);
+    }
+
+    fn persisted_similarity_test_scores() -> Vec<GroupSimilarityScore> {
+        vec![GroupSimilarityScore {
+            left_image_id: 1,
+            right_image_id: 2,
+            ssim_score: Some(0.987654),
+            error_message: None,
+        }]
+    }
+
+    #[test]
+    fn persisted_result_memory_cache_respects_the_entry_limit() {
+        let mut cache = HashMap::new();
+        for index in 0..(GROUP_SIMILARITY_RESULT_CACHE_LIMIT + 5) {
+            let key = GroupSimilarityResultCacheKey {
+                run_id: format!("run-{index}"),
+                algorithm_profile_id: CURRENT_ALGORITHM_PROFILE_ID.to_string(),
+                members: Vec::new(),
+            };
+            insert_group_similarity_result_cache_entry(
+                &mut cache,
+                key,
+                Vec::new(),
+                GROUP_SIMILARITY_RESULT_CACHE_LIMIT,
+            );
+        }
+
+        assert_eq!(cache.len(), GROUP_SIMILARITY_RESULT_CACHE_LIMIT);
+    }
+
+    #[test]
+    fn persisted_group_similarity_scores_round_trip_for_the_same_members() {
+        let repo = create_test_repo();
+        let images = vec![
+            image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "b.png", 1000, 667, 300_000, "0000000000000002"),
+        ];
+        let key = group_similarity_result_cache_key("run-1", &images);
+        let scores = persisted_similarity_test_scores();
+
+        persist_group_similarity_scores(&repo, &key, &scores).unwrap();
+        let loaded = read_persisted_group_similarity_scores(&repo, &key)
+            .unwrap()
+            .expect("相同成员和指纹应该命中持久化 SSIM");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].left_image_id, 1);
+        assert_eq!(loaded[0].right_image_id, 2);
+        assert_eq!(loaded[0].ssim_score, Some(0.987654));
+    }
+
+    #[test]
+    fn persisted_group_similarity_ignores_member_order() {
+        let repo = create_test_repo();
+        let images = vec![
+            image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "b.png", 1000, 667, 300_000, "0000000000000002"),
+        ];
+        let reversed = vec![images[1].clone(), images[0].clone()];
+        let first_key = group_similarity_result_cache_key("run-1", &images);
+        let second_key = group_similarity_result_cache_key("run-1", &reversed);
+
+        persist_group_similarity_scores(&repo, &first_key, &persisted_similarity_test_scores())
+            .unwrap();
+
+        assert!(read_persisted_group_similarity_scores(&repo, &second_key)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn persisted_group_similarity_misses_when_a_file_fingerprint_changes() {
+        let repo = create_test_repo();
+        let left = image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001");
+        let right = image_summary_for_plan(2, "b.png", 1000, 667, 300_000, "0000000000000002");
+        let first_key = group_similarity_result_cache_key("run-1", &[left.clone(), right.clone()]);
+        persist_group_similarity_scores(&repo, &first_key, &persisted_similarity_test_scores())
+            .unwrap();
+
+        let mut changed_left = left;
+        changed_left.current_modified_ns += 1;
+        let changed_key = group_similarity_result_cache_key("run-1", &[changed_left, right]);
+
+        assert!(read_persisted_group_similarity_scores(&repo, &changed_key)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn persisted_group_similarity_does_not_store_error_results() {
+        let repo = create_test_repo();
+        let images = vec![
+            image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "b.png", 1000, 667, 300_000, "0000000000000002"),
+        ];
+        let key = group_similarity_result_cache_key("run-1", &images);
+        let scores = vec![GroupSimilarityScore {
+            left_image_id: 1,
+            right_image_id: 2,
+            ssim_score: None,
+            error_message: Some("decode failed".to_string()),
+        }];
+
+        persist_group_similarity_scores(&repo, &key, &scores).unwrap();
+
+        assert!(read_persisted_group_similarity_scores(&repo, &key)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn persisted_group_similarity_rejects_scores_for_images_outside_the_group() {
+        let repo = create_test_repo();
+        let images = vec![
+            image_summary_for_plan(1, "a.png", 3000, 2000, 3_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "b.png", 1000, 667, 300_000, "0000000000000002"),
+        ];
+        let key = group_similarity_result_cache_key("run-1", &images);
+        let invalid_scores = vec![GroupSimilarityScore {
+            left_image_id: 1,
+            right_image_id: 999,
+            ssim_score: Some(0.99),
+            error_message: None,
+        }];
+        persist_group_similarity_scores(&repo, &key, &invalid_scores).unwrap();
+
+        assert!(read_persisted_group_similarity_scores(&repo, &key)
+            .unwrap()
+            .is_none());
+    }
+
+    fn image_summary_for_saved_test_image(
+        id: i64,
+        path: &Path,
+        width: u32,
+        height: u32,
+        phash: &str,
+    ) -> ImageSummary {
+        let metadata = std::fs::metadata(path).unwrap();
+        let modified_at = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        ImageSummary {
+            id,
+            file_path: path.to_string_lossy().into_owned(),
+            canonical_file_path: path.to_string_lossy().into_owned(),
+            relative_path: path.file_name().unwrap().to_string_lossy().into_owned(),
+            file_size: metadata.len() as i64,
+            file_modified_at: modified_at,
+            current_file_size: metadata.len(),
+            current_modified_ns: 0,
+            width,
+            height,
+            phash: Some(phash.to_string()),
+        }
+    }
+
+    #[test]
+    fn persisted_group_similarity_computation_writes_the_successful_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_path = temp.path().join("original.png");
+        let thumbnail_path = temp.path().join("thumbnail.png");
+        GrayImage::from_pixel(8, 8, Luma([120]))
+            .save(&original_path)
+            .unwrap();
+        GrayImage::from_pixel(4, 4, Luma([120]))
+            .save(&thumbnail_path)
+            .unwrap();
+        let images = vec![
+            image_summary_for_saved_test_image(1, &original_path, 8, 8, "0000000000000000"),
+            image_summary_for_saved_test_image(2, &thumbnail_path, 4, 4, "0000000000000001"),
+        ];
+        let repo = Arc::new(Mutex::new(create_test_repo()));
+
+        let scores = compute_persisted_group_similarity_scores(
+            &repo,
+            "run-1",
+            &images,
+            "test-request",
+            None,
+            algorithm_pool(),
+            true,
+        )
+        .unwrap();
+        let cache_count: i64 = repo
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM comparison_group_similarity_cache WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(scores.len(), 1);
+        assert_eq!(cache_count, 1);
+    }
+
+    #[test]
+    fn completed_similarity_work_clears_memory_when_the_run_was_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_path = temp.path().join("deleted-original.png");
+        let thumbnail_path = temp.path().join("deleted-thumbnail.png");
+        GrayImage::from_pixel(8, 8, Luma([120]))
+            .save(&original_path)
+            .unwrap();
+        GrayImage::from_pixel(4, 4, Luma([120]))
+            .save(&thumbnail_path)
+            .unwrap();
+        let images = vec![
+            image_summary_for_saved_test_image(101, &original_path, 8, 8, "0000000000000000"),
+            image_summary_for_saved_test_image(102, &thumbnail_path, 4, 4, "0000000000000001"),
+        ];
+
+        let conn = Connection::open_in_memory().unwrap();
+        schema::initialize_database(&conn).unwrap();
+        let repo = Repository::new(conn);
+        let run_id = "deleted-cache-run";
+        repo.create_run(
+            run_id,
+            "0.1.0",
+            CURRENT_ALGORITHM_PROFILE_ID,
+            "D:/baseline",
+            "A",
+            &["D:/comparison".to_string()],
+            &["B".to_string()],
+            &RunConfig::default(),
+        )
+        .unwrap();
+        repo.conn()
+            .execute("DELETE FROM runs WHERE run_id = ?1", [run_id])
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repo));
+
+        let error = compute_persisted_group_similarity_scores(
+            &repo,
+            run_id,
+            &images,
+            "deleted-run-request",
+            None,
+            algorithm_pool(),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("运行不存在"));
+        assert!(group_similarity_cache()
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| key.run_id != run_id));
+        assert!(group_similarity_result_cache()
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| key.run_id != run_id));
+        assert!(group_similarity_image_cache()
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| key.run_id != run_id));
+    }
+
+    #[test]
+    fn background_group_order_starts_after_the_foreground_group() {
+        let groups = (1..=4)
+            .map(|group_index| ComparisonGroup {
+                group_index,
+                representative_image_id: group_index as i64,
+                representative_file_name: format!("{group_index}.png"),
+                member_count: 2,
+                has_low_quality_suggestion: false,
+                members: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_backfill_group_indices(&groups, &[2]), vec![3, 4, 1]);
+    }
+
+    #[test]
+    fn background_group_order_uses_source_indices_and_skips_single_image_groups() {
+        let groups = (1..=4)
+            .map(|group_index| ComparisonGroup {
+                group_index,
+                representative_image_id: group_index as i64,
+                representative_file_name: format!("{group_index}.png"),
+                member_count: if group_index == 3 { 1 } else { 2 },
+                has_low_quality_suggestion: false,
+                members: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_backfill_group_indices(&groups, &[1, 2]),
+            vec![4, 1, 2]
+        );
+    }
+
+    #[test]
+    fn background_group_scheduler_deduplicates_the_same_run_and_distance() {
+        let state = GroupSimilarityBackfillState::default();
+        let key = GroupSimilarityBackfillKey {
+            run_id: "run-1".to_string(),
+            grouping_distance: 10,
+        };
+
+        assert!(state.try_start(key.clone()));
+        assert!(!state.try_start(key.clone()));
+        state.finish(&key);
+        assert!(state.try_start(key));
     }
 
     #[test]

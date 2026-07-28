@@ -11,7 +11,8 @@ const apiMocks = vi.hoisted(() => ({
     ssim_score: 0.971947,
     error_message: null
   }])),
-  batchRecycleImages: vi.fn()
+  batchRecycleImages: vi.fn(),
+  startGroupSimilarityBackfill: vi.fn(async () => undefined)
 }))
 
 const clipboardWrite = vi.fn(async () => undefined)
@@ -21,6 +22,9 @@ const store = reactive({
   selectedGroup: null as any,
   selectedMemberId: 1 as number | null,
   checkedImageIds: [] as number[],
+  appliedGroupingDistance: 10,
+  isRefreshingGroups: false,
+  groupingDataRevision: 0,
   qualitySelectionThreshold: 0.8,
   selectGroupMember: vi.fn(),
   setQualitySelectionThreshold: vi.fn((value: number) => {
@@ -31,7 +35,8 @@ const store = reactive({
 
 vi.mock('@/api/comparison', () => ({
   getGroupSimilarityScores: apiMocks.getGroupSimilarityScores,
-  batchRecycleImages: apiMocks.batchRecycleImages
+  batchRecycleImages: apiMocks.batchRecycleImages,
+  startGroupSimilarityBackfill: apiMocks.startGroupSimilarityBackfill
 }))
 
 vi.mock('@/stores/comparisonStore', () => ({
@@ -85,6 +90,9 @@ describe('ComparisonGroupDetail threshold semantics', () => {
     }
     store.selectedMemberId = 1
     store.checkedImageIds = []
+    store.appliedGroupingDistance = 10
+    store.isRefreshingGroups = false
+    store.groupingDataRevision = 0
     store.qualitySelectionThreshold = 0.8
   })
 
@@ -211,6 +219,144 @@ describe('ComparisonGroupDetail threshold semantics', () => {
 
     await selectAll.get('input').setValue(false)
     expect(store.checkedImageIds).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('starts background backfill after the current group scores are ready', async () => {
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    expect(apiMocks.startGroupSimilarityBackfill).toHaveBeenCalledWith('run-1', 10, [1])
+    wrapper.unmount()
+  })
+
+  it('revalidates current group scores through the backend before restarting backfill', async () => {
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+    apiMocks.getGroupSimilarityScores.mockClear()
+    apiMocks.startGroupSimilarityBackfill.mockClear()
+
+    const recalculateButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('重新计算图片归属'))
+    expect(recalculateButton).toBeDefined()
+    await recalculateButton!.trigger('click')
+    await flushPromises()
+
+    expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledTimes(1)
+    expect(apiMocks.startGroupSimilarityBackfill).toHaveBeenCalledWith('run-1', 10, [1])
+    wrapper.unmount()
+  })
+
+  it('starts backfill for the refreshed grouping distance only after refresh finishes', async () => {
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+    apiMocks.getGroupSimilarityScores.mockClear()
+    apiMocks.startGroupSimilarityBackfill.mockClear()
+
+    store.isRefreshingGroups = true
+    store.appliedGroupingDistance = 14
+    await flushPromises()
+    expect(apiMocks.getGroupSimilarityScores).not.toHaveBeenCalled()
+
+    store.groupingDataRevision += 1
+    store.isRefreshingGroups = false
+    await flushPromises()
+    expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledTimes(1)
+    expect(apiMocks.startGroupSimilarityBackfill).toHaveBeenCalledWith('run-1', 14, [1])
+    wrapper.unmount()
+  })
+
+  it('does not let an old group request start backfill for a newly applied distance', async () => {
+    let resolveOldRequest: ((scores: any[]) => void) | null = null
+    apiMocks.getGroupSimilarityScores.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveOldRequest = resolve
+    }))
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    store.isRefreshingGroups = true
+    store.appliedGroupingDistance = 14
+    await flushPromises()
+    resolveOldRequest?.([])
+    await flushPromises()
+    expect(apiMocks.startGroupSimilarityBackfill).not.toHaveBeenCalled()
+
+    store.groupingDataRevision += 1
+    store.isRefreshingGroups = false
+    await flushPromises()
+    expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledTimes(2)
+    expect(apiMocks.startGroupSimilarityBackfill).toHaveBeenCalledWith('run-1', 14, [1])
+    wrapper.unmount()
+  })
+
+  it('does not start a new-distance backfill when grouping refresh fails', async () => {
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+    apiMocks.getGroupSimilarityScores.mockClear()
+    apiMocks.startGroupSimilarityBackfill.mockClear()
+
+    store.isRefreshingGroups = true
+    store.appliedGroupingDistance = 14
+    await flushPromises()
+    store.isRefreshingGroups = false
+    await flushPromises()
+
+    expect(apiMocks.getGroupSimilarityScores).not.toHaveBeenCalled()
+    expect(apiMocks.startGroupSimilarityBackfill).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('uses original source group indices after manual groups are renumbered', async () => {
+    store.selectedGroup = {
+      ...store.selectedGroup,
+      group_index: 2,
+      source_group_indices: [3]
+    }
+
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    expect(apiMocks.startGroupSimilarityBackfill).toHaveBeenCalledWith('run-1', 10, [3])
+    wrapper.unmount()
+  })
+
+  it('starts background backfill when the current group needs no pair comparison', async () => {
+    store.selectedGroup = {
+      group_index: 1,
+      representative_image_id: 1,
+      representative_file_name: '1.png',
+      member_count: 1,
+      has_low_quality_suggestion: false,
+      members: [member(1)]
+    }
+
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    expect(apiMocks.getGroupSimilarityScores).not.toHaveBeenCalled()
+    expect(apiMocks.startGroupSimilarityBackfill).toHaveBeenCalledWith('run-1', 10, [1])
     wrapper.unmount()
   })
 })

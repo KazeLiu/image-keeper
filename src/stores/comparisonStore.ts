@@ -84,6 +84,7 @@ export const useComparisonStore = defineStore('comparison', () => {
   const groupingDistance = ref(DEFAULT_GROUPING_DISTANCE)
   const appliedGroupingDistance = ref(DEFAULT_GROUPING_DISTANCE)
   const isRefreshingGroups = ref(false)
+  const groupingDataRevision = ref(0)
   const groupEditMode = ref(false)
   const qualitySelectionThreshold = ref(readStoredQualitySelectionThreshold())
 
@@ -318,6 +319,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     isRefreshingGroups.value = true
     try {
       autoGroups.value = await getComparisonGroups(currentRunId.value, appliedGroupingDistance.value)
+      groupingDataRevision.value += 1
       ensureSelectedGroup()
       applyQualitySelectionForCurrentGroup()
     } finally {
@@ -337,6 +339,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     stats.value = nextStats
     results.value = nextResults
     autoGroups.value = nextGroups
+    groupingDataRevision.value += 1
     ensureSelectedGroup()
     applyQualitySelectionForCurrentGroup()
   }
@@ -448,6 +451,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     manualMergeSets.value = []
     groupingDistance.value = DEFAULT_GROUPING_DISTANCE
     appliedGroupingDistance.value = DEFAULT_GROUPING_DISTANCE
+    groupingDataRevision.value = 0
     groupEditMode.value = false
     clearGroupingRefreshTimer()
   }
@@ -930,6 +934,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     groupingDistance,
     appliedGroupingDistance,
     isRefreshingGroups,
+    groupingDataRevision,
     groupEditMode,
     qualitySelectionThreshold,
 

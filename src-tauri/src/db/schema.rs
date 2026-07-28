@@ -254,6 +254,44 @@ CREATE INDEX IF NOT EXISTS idx_recycle_bin_recycled_at ON recycle_bin(recycled_a
 CREATE INDEX IF NOT EXISTS idx_recycle_bin_can_restore ON recycle_bin(can_restore);
 
 -- ============================================================================
+-- 正式任务分组缓存
+-- 按运行、算法版本和分组距离保存完整分组快照，避免历史任务重复做 O(N^2) pHash 分组
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS comparison_group_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    algorithm_profile_id TEXT NOT NULL,
+    grouping_distance INTEGER NOT NULL CHECK (grouping_distance BETWEEN 0 AND 24),
+    source_image_count INTEGER NOT NULL,
+    operation_revision INTEGER NOT NULL DEFAULT 0,
+    groups_json TEXT NOT NULL,
+    computed_at INTEGER NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+    UNIQUE(run_id, algorithm_profile_id, grouping_distance)
+);
+
+CREATE INDEX IF NOT EXISTS idx_comparison_group_cache_run_id
+    ON comparison_group_cache(run_id);
+
+-- ============================================================================
+-- 正式任务组内 SSIM 缓存
+-- 成员签名包含文件指纹和算法版本；临时小工具不读取本表
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS comparison_group_similarity_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    algorithm_profile_id TEXT NOT NULL,
+    member_signature TEXT NOT NULL,
+    scores_json TEXT NOT NULL,
+    computed_at INTEGER NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+    UNIQUE(run_id, algorithm_profile_id, member_signature)
+);
+
+CREATE INDEX IF NOT EXISTS idx_comparison_group_similarity_cache_run_id
+    ON comparison_group_similarity_cache(run_id);
+
+-- ============================================================================
 -- 设置表 (settings)
 -- 保留用户配置
 -- ============================================================================
@@ -302,14 +340,15 @@ mod tests {
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (
                     'runs', 'algorithm_profiles', 'folders', 'images',
                     'analysis_results', 'review_status', 'operation_logs',
-                    'recycle_bin', 'settings'
+                    'recycle_bin', 'settings', 'comparison_group_cache',
+                    'comparison_group_similarity_cache'
                 )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
 
-        assert_eq!(table_count, 9, "应该创建 9 个核心表");
+        assert_eq!(table_count, 11, "应该创建正式任务的核心表和派生结果缓存表");
 
         let current_profile_count: i32 = conn
             .query_row(

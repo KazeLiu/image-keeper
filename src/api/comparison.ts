@@ -47,6 +47,19 @@ export async function getGroupSimilarityScores(
   })
 }
 
+/** 当前组完成后，低优先级补算正式任务中的其他分组 */
+export async function startGroupSimilarityBackfill(
+  runId: string,
+  groupingDistance: number,
+  afterGroupIndices: number[]
+): Promise<void> {
+  await invoke('start_group_similarity_backfill', {
+    runId,
+    groupingDistance,
+    afterGroupIndices
+  })
+}
+
 /** 按图片 ID 批量移动到回收站 */
 export async function batchRecycleImages(
   runId: string,

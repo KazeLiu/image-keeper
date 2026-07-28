@@ -16,6 +16,9 @@ fn main() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(repository)))
         .manage(Arc::new(
+            commands::comparison::GroupSimilarityBackfillState::default(),
+        ))
+        .manage(Arc::new(
             commands::difference_finder::DifferenceFinderState::default(),
         ))
         .plugin(tauri_plugin_dialog::init())
@@ -48,6 +51,7 @@ fn main() {
             commands::comparison::get_comparison_results,
             commands::comparison::get_comparison_groups,
             commands::comparison::get_group_similarity_scores,
+            commands::comparison::start_group_similarity_backfill,
             commands::comparison::get_run_status,
             commands::comparison::list_comparison_runs,
             commands::comparison::delete_comparison_run,
