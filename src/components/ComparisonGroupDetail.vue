@@ -10,6 +10,17 @@
             </div>
           </div>
           <div class="detail-actions">
+            <el-button
+              :icon="CopyDocument"
+              plain
+              size="small"
+              data-test="copy-checked-names"
+              :disabled="isLoadingCrossCheck || checkedDeleteCandidates.length === 0"
+              @click="copyCheckedDeleteFileNames"
+            >
+              复制已选文件名
+            </el-button>
+
             <el-popover
               v-model:visible="thresholdPopoverVisible"
               trigger="click"
@@ -155,7 +166,20 @@
         :row-class-name="getOriginalRowClassName"
         @row-click="handleOriginalRowClick"
       >
-        <el-table-column type="expand" width="42">
+        <el-table-column type="expand" width="58">
+          <template #header>
+            <el-tooltip content="全选本组可删除候选" placement="top">
+              <el-checkbox
+                data-test="select-all-delete"
+                :model-value="allDeleteCandidatesChecked"
+                :indeterminate="someDeleteCandidatesChecked"
+                :disabled="selectableDeleteCandidates.length === 0"
+                aria-label="全选本组可删除候选"
+                @change="handleSelectAllDeleteChange"
+                @click.stop
+              />
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
             <div class="thumbnail-panel">
               <el-empty
@@ -459,7 +483,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Loading, QuestionFilled, Setting } from '@element-plus/icons-vue'
+import { CopyDocument, Loading, QuestionFilled, Setting } from '@element-plus/icons-vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { batchRecycleImages, getGroupSimilarityScores } from '@/api/comparison'
@@ -551,6 +575,26 @@ const visibleOriginalRows = computed(() =>
 )
 const hiddenOriginalRowCount = computed(() =>
   originalRows.value.filter((row) => row.candidates.length === 0).length
+)
+const deleteCandidates = computed(() => originalRows.value.flatMap((row) => row.candidates))
+const selectableDeleteCandidates = computed(() =>
+  deleteCandidates.value.filter((candidate) => candidate.shouldDelete)
+)
+const checkedDeleteCandidates = computed(() =>
+  deleteCandidates.value.filter((candidate) =>
+    store.checkedImageIds.includes(candidate.member.image_id)
+  )
+)
+const allDeleteCandidatesChecked = computed(() =>
+  selectableDeleteCandidates.value.length > 0
+  && selectableDeleteCandidates.value.every((candidate) =>
+    store.checkedImageIds.includes(candidate.member.image_id)
+  )
+)
+const someDeleteCandidatesChecked = computed(() =>
+  selectableDeleteCandidates.value.some((candidate) =>
+    store.checkedImageIds.includes(candidate.member.image_id)
+  ) && !allDeleteCandidatesChecked.value
 )
 
 const crossCheckProgressTotal = computed(() => {
@@ -742,6 +786,12 @@ function copyFileName(member: ComparisonGroupMember) {
 
 function copyFolderPath(member: ComparisonGroupMember) {
   void copyText(getFolderPath(member), '已复制文件夹路径')
+}
+
+function copyCheckedDeleteFileNames() {
+  const fileNames = checkedDeleteCandidates.value.map((candidate) => getFileName(candidate.member))
+  if (fileNames.length === 0) return
+  void copyText(fileNames.join(','), `已复制 ${fileNames.length} 个文件名`)
 }
 
 async function openFolder(member: ComparisonGroupMember) {
@@ -972,6 +1022,21 @@ function handleCandidateDeleteChange(candidate: ThumbnailCandidate, checked: str
   }
 
   removeCheckedImage(candidate.member.image_id)
+}
+
+function handleSelectAllDeleteChange(checked: string | number | boolean) {
+  const currentCandidateIds = new Set(
+    deleteCandidates.value.map((candidate) => candidate.member.image_id)
+  )
+  const checkedOutsideCurrentGroup = store.checkedImageIds.filter(
+    (imageId) => !currentCandidateIds.has(imageId)
+  )
+  store.checkedImageIds = checked
+    ? [
+        ...checkedOutsideCurrentGroup,
+        ...selectableDeleteCandidates.value.map((candidate) => candidate.member.image_id)
+      ]
+    : checkedOutsideCurrentGroup
 }
 
 function removeCheckedImage(imageId: number) {

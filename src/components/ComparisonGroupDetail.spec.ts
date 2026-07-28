@@ -14,6 +14,8 @@ const apiMocks = vi.hoisted(() => ({
   batchRecycleImages: vi.fn()
 }))
 
+const clipboardWrite = vi.fn(async () => undefined)
+
 const store = reactive({
   currentRunId: 'run-1',
   selectedGroup: null as any,
@@ -69,6 +71,10 @@ function member(id: number, overrides: Record<string, unknown> = {}) {
 describe('ComparisonGroupDetail threshold semantics', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite }
+    })
     store.selectedGroup = {
       group_index: 1,
       representative_image_id: 1,
@@ -143,6 +149,68 @@ describe('ComparisonGroupDetail threshold semantics', () => {
     expect(candidateTable.get('input[type="checkbox"]').attributes('disabled')).toBeDefined()
     expect(tooltipContents).toContain('缺少与当前原图的标准 SSIM，未自动勾选')
 
+    wrapper.unmount()
+  })
+
+  it('copies checked delete file names with commas before the threshold action', async () => {
+    apiMocks.getGroupSimilarityScores.mockResolvedValueOnce([
+      { left_image_id: 1, right_image_id: 2, ssim_score: 0.971947, error_message: null },
+      { left_image_id: 1, right_image_id: 3, ssim_score: 0.96, error_message: null }
+    ])
+    store.selectedGroup = {
+      group_index: 1,
+      representative_image_id: 1,
+      representative_file_name: '1.png',
+      member_count: 3,
+      has_low_quality_suggestion: true,
+      members: [member(1), member(2), member(3)]
+    }
+
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    const actionLabels = wrapper.findAll('.detail-actions button').map((button) => button.text())
+    expect(actionLabels).toContain('复制已选文件名')
+    expect(actionLabels.indexOf('复制已选文件名')).toBeLessThan(actionLabels.indexOf('判断阈值'))
+
+    await wrapper.get('[data-test="copy-checked-names"]').trigger('click')
+    await flushPromises()
+
+    expect(clipboardWrite).toHaveBeenCalledWith('2.png,3.png')
+    wrapper.unmount()
+  })
+
+  it('selects and clears every deletable candidate from the table header', async () => {
+    apiMocks.getGroupSimilarityScores.mockResolvedValueOnce([
+      { left_image_id: 1, right_image_id: 2, ssim_score: 0.971947, error_message: null },
+      { left_image_id: 1, right_image_id: 3, ssim_score: 0.96, error_message: null }
+    ])
+    store.selectedGroup = {
+      group_index: 1,
+      representative_image_id: 1,
+      representative_file_name: '1.png',
+      member_count: 3,
+      has_low_quality_suggestion: true,
+      members: [member(1), member(2), member(3)]
+    }
+
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+    store.checkedImageIds = []
+    await wrapper.vm.$nextTick()
+
+    const selectAll = wrapper.get('[data-test="select-all-delete"]')
+    await selectAll.get('input').setValue(true)
+    expect(store.checkedImageIds).toEqual([2, 3])
+
+    await selectAll.get('input').setValue(false)
+    expect(store.checkedImageIds).toEqual([])
     wrapper.unmount()
   })
 })
