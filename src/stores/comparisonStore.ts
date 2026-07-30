@@ -8,6 +8,7 @@ import {
   getComparisonStats,
   getComparisonResults,
   getComparisonGroups,
+  getGroupSimilarityStatuses,
   getRunStatus,
   listComparisonRuns,
   deleteComparisonRun
@@ -17,6 +18,8 @@ import type {
   ComparisonStats,
   ComparisonResultRow,
   ComparisonGroup,
+  GroupSimilarityStatus,
+  GroupSimilarityStatusValue,
   MultiCompareProgressEvent,
   RunStatusResponse,
   ComparisonRunHistoryItem
@@ -44,9 +47,7 @@ interface ManualMergeSet {
 const DEFAULT_GROUPING_DISTANCE = 10
 const MIN_GROUPING_DISTANCE = 0
 const MAX_GROUPING_DISTANCE = 24
-const DEFAULT_QUALITY_SELECTION_THRESHOLD = 0.99
 const LAST_RUN_ID_KEY = 'imagekeeper:last-comparison-run-id'
-const QUALITY_SELECTION_THRESHOLD_KEY = 'imagekeeper:quality-selection-threshold'
 
 export const useComparisonStore = defineStore('comparison', () => {
   // 目录选择
@@ -86,12 +87,14 @@ export const useComparisonStore = defineStore('comparison', () => {
   const isRefreshingGroups = ref(false)
   const groupingDataRevision = ref(0)
   const groupEditMode = ref(false)
-  const qualitySelectionThreshold = ref(readStoredQualitySelectionThreshold())
+  const groupSimilarityStatuses = ref<Record<string, GroupSimilarityStatus>>({})
 
   let unlistenProgress: UnlistenFn | null = null
   let unlistenComplete: UnlistenFn | null = null
   let statusPollingTimer: ReturnType<typeof window.setInterval> | null = null
   let groupingRefreshTimer: ReturnType<typeof window.setTimeout> | null = null
+  let unlistenGroupSimilarityStatus: UnlistenFn | null = null
+  let groupSimilarityStatusListenerPromise: Promise<void> | null = null
   const bufferedProgress = new Map<string, MultiCompareProgressEvent>()
   const bufferedCompletions = new Set<string>()
 
@@ -321,7 +324,7 @@ export const useComparisonStore = defineStore('comparison', () => {
       autoGroups.value = await getComparisonGroups(currentRunId.value, appliedGroupingDistance.value)
       groupingDataRevision.value += 1
       ensureSelectedGroup()
-      applyQualitySelectionForCurrentGroup()
+      await refreshGroupSimilarityStatuses()
     } finally {
       isRefreshingGroups.value = false
     }
@@ -341,7 +344,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     autoGroups.value = nextGroups
     groupingDataRevision.value += 1
     ensureSelectedGroup()
-    applyQualitySelectionForCurrentGroup()
+    await refreshGroupSimilarityStatuses()
   }
 
   async function refreshHistory() {
@@ -453,6 +456,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     appliedGroupingDistance.value = DEFAULT_GROUPING_DISTANCE
     groupingDataRevision.value = 0
     groupEditMode.value = false
+    groupSimilarityStatuses.value = {}
     clearGroupingRefreshTimer()
   }
 
@@ -528,7 +532,103 @@ export const useComparisonStore = defineStore('comparison', () => {
 
     selectedGroupIndex.value = group.group_index
     selectedMemberId.value = group.members[0]?.image_id || null
-    applyQualitySelectionForCurrentGroup()
+  }
+
+  function groupSimilarityStatusKey(imageIds: number[]) {
+    return [...imageIds].sort((left, right) => left - right).join(',')
+  }
+
+  function applyGroupSimilarityStatus(status: GroupSimilarityStatus) {
+    if (
+      status.run_id !== currentRunId.value
+      || status.grouping_distance !== appliedGroupingDistance.value
+    ) return
+
+    const key = groupSimilarityStatusKey(status.image_ids)
+    groupSimilarityStatuses.value = {
+      ...groupSimilarityStatuses.value,
+      [key]: status
+    }
+  }
+
+  async function ensureGroupSimilarityStatusListener() {
+    if (unlistenGroupSimilarityStatus) return
+    if (!groupSimilarityStatusListenerPromise) {
+      groupSimilarityStatusListenerPromise = listen<GroupSimilarityStatus>(
+        'group-similarity-status',
+        (event) => applyGroupSimilarityStatus(event.payload)
+      )
+        .then((unlisten) => {
+          unlistenGroupSimilarityStatus = unlisten
+        })
+        .catch((error) => {
+          console.warn('监听分组 SSIM 状态失败:', error)
+        })
+        .finally(() => {
+          groupSimilarityStatusListenerPromise = null
+        })
+    }
+    await groupSimilarityStatusListenerPromise
+  }
+
+  async function refreshGroupSimilarityStatuses() {
+    const runId = currentRunId.value
+    const distance = appliedGroupingDistance.value
+    if (!runId) {
+      groupSimilarityStatuses.value = {}
+      return
+    }
+
+    try {
+      await ensureGroupSimilarityStatusListener()
+      const statuses = await getGroupSimilarityStatuses(runId, distance)
+      if (runId !== currentRunId.value || distance !== appliedGroupingDistance.value) return
+
+      const nextStatuses: Record<string, GroupSimilarityStatus> = {}
+      for (const status of statuses) {
+        const key = groupSimilarityStatusKey(status.image_ids)
+        const currentStatus = groupSimilarityStatuses.value[key]
+        nextStatuses[key] = currentStatus?.status === 'running' && status.status === 'pending'
+          ? currentStatus
+          : status
+      }
+      groupSimilarityStatuses.value = nextStatuses
+    } catch (error) {
+      console.warn('刷新分组 SSIM 状态失败:', error)
+    }
+  }
+
+  function getGroupSimilarityStatus(group: ComparisonGroup): GroupSimilarityStatus {
+    const imageIds = group.members.map((member) => member.image_id)
+    const cachedStatus = groupSimilarityStatuses.value[groupSimilarityStatusKey(imageIds)]
+    if (cachedStatus) return cachedStatus
+
+    const onlyOneImage = imageIds.length < 2
+    return {
+      run_id: currentRunId.value,
+      grouping_distance: appliedGroupingDistance.value,
+      group_index: group.group_index,
+      image_ids: [...imageIds].sort((left, right) => left - right),
+      status: onlyOneImage ? 'completed' : 'pending',
+      message: onlyOneImage
+        ? '本组只有一张图片，无需进行组内 SSIM 比对'
+        : '尚未比对，正在等待后台 SSIM 计算'
+    }
+  }
+
+  function markGroupSimilarityStatus(
+    group: ComparisonGroup,
+    status: GroupSimilarityStatusValue,
+    message: string
+  ) {
+    applyGroupSimilarityStatus({
+      run_id: currentRunId.value,
+      grouping_distance: appliedGroupingDistance.value,
+      group_index: group.group_index,
+      image_ids: group.members.map((member) => member.image_id),
+      status,
+      message
+    })
   }
 
   function clearCheckedSelections() {
@@ -589,35 +689,9 @@ export const useComparisonStore = defineStore('comparison', () => {
     if (mergedGroup) {
       selectedGroupIndex.value = mergedGroup.group_index
       selectedMemberId.value = mergedGroup.members[0]?.image_id || null
-      applyQualitySelectionForCurrentGroup()
     }
 
     return mergedGroup || null
-  }
-
-  function setQualitySelectionThreshold(nextThreshold: number) {
-    qualitySelectionThreshold.value = Math.min(1, Math.max(0.8, Math.round(nextThreshold * 10000) / 10000))
-    rememberQualitySelectionThreshold(qualitySelectionThreshold.value)
-    applyQualitySelectionForCurrentGroup()
-  }
-
-  function applyQualitySelectionForCurrentGroup() {
-    const group = selectedGroup.value
-    if (!group) {
-      checkedImageIds.value = []
-      return
-    }
-
-    checkedImageIds.value = group.members
-      .filter((member) => shouldAutoSelectLowQualityMember(member))
-      .map((member) => member.image_id)
-  }
-
-  function shouldAutoSelectLowQualityMember(member: ComparisonGroup['members'][number]) {
-    if (member.role === 'reference') return false
-    if (!member.is_low_quality_suggestion) return false
-    if (typeof member.ssim_score !== 'number') return false
-    return member.ssim_score >= qualitySelectionThreshold.value
   }
 
   function buildDisplayGroups(
@@ -885,17 +959,6 @@ export const useComparisonStore = defineStore('comparison', () => {
     return window.localStorage.getItem(LAST_RUN_ID_KEY)
   }
 
-  function readStoredQualitySelectionThreshold() {
-    const rawValue = window.localStorage.getItem(QUALITY_SELECTION_THRESHOLD_KEY)
-    const parsedValue = rawValue ? Number(rawValue) : DEFAULT_QUALITY_SELECTION_THRESHOLD
-    if (!Number.isFinite(parsedValue)) return DEFAULT_QUALITY_SELECTION_THRESHOLD
-    return Math.min(1, Math.max(0.8, Math.round(parsedValue * 10000) / 10000))
-  }
-
-  function rememberQualitySelectionThreshold(threshold: number) {
-    window.localStorage.setItem(QUALITY_SELECTION_THRESHOLD_KEY, threshold.toString())
-  }
-
   // 获取阶段名称（中文）
   function getPhaseName(phase: string): string {
     const phaseMap: Record<string, string> = {
@@ -936,7 +999,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     isRefreshingGroups,
     groupingDataRevision,
     groupEditMode,
-    qualitySelectionThreshold,
+    groupSimilarityStatuses,
 
     // 计算属性
     progressPercentage,
@@ -966,12 +1029,12 @@ export const useComparisonStore = defineStore('comparison', () => {
     clearCurrentRunView,
     selectGroup,
     selectGroupMember,
+    getGroupSimilarityStatus,
+    markGroupSimilarityStatus,
     clearCheckedSelections,
     clearManualGroupingState,
     setGroupingDistance,
     mergeSelectedGroups,
-    setQualitySelectionThreshold,
-    applyQualitySelectionForCurrentGroup,
     getPhaseName
   }
 })

@@ -2,20 +2,6 @@ export function formatSsim(value: number) {
   return value.toFixed(6)
 }
 
-export function qualitySliderValueToThreshold(sliderValue: number) {
-  const tick = Math.min(138, Math.max(0, Math.round(sliderValue)))
-  if (tick <= 18) return (8000 + tick * 100) / 10000
-  if (tick <= 38) return (9800 + (tick - 18) * 5) / 10000
-  return (9900 + tick - 38) / 10000
-}
-
-export function qualityThresholdToSliderValue(threshold: number) {
-  const basisPoints = Math.round(Math.min(1, Math.max(0.8, threshold)) * 10000)
-  if (basisPoints <= 9800) return Math.round((basisPoints - 8000) / 100)
-  if (basisPoints <= 9900) return 18 + Math.round((basisPoints - 9800) / 5)
-  return 38 + basisPoints - 9900
-}
-
 export function precisionSliderValueToThreshold(sliderValue: number) {
   const tick = Math.min(140, Math.max(0, Math.round(sliderValue)))
   if (tick <= 40) return (9500 + tick * 10) / 10000

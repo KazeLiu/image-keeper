@@ -145,6 +145,17 @@ pub struct GroupSimilarityProgress {
     pub skipped_pairs: usize,
 }
 
+/// 正式任务中一个相似分组的 SSIM 计算状态。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GroupSimilarityStatus {
+    pub run_id: String,
+    pub grouping_distance: i32,
+    pub group_index: usize,
+    pub image_ids: Vec<i64>,
+    pub status: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 struct GroupSimilarityPlanPair {
     left_index: usize,
@@ -783,12 +794,27 @@ struct GroupSimilarityBackfillKey {
 
 #[derive(Default)]
 pub struct GroupSimilarityBackfillState {
-    active_jobs: Mutex<HashSet<GroupSimilarityBackfillKey>>,
+    active_jobs: Mutex<HashMap<GroupSimilarityBackfillKey, Option<usize>>>,
 }
 
 impl GroupSimilarityBackfillState {
     fn try_start(&self, key: GroupSimilarityBackfillKey) -> bool {
-        self.active_jobs.lock().unwrap().insert(key)
+        let mut active_jobs = self.active_jobs.lock().unwrap();
+        if active_jobs.contains_key(&key) {
+            return false;
+        }
+        active_jobs.insert(key, None);
+        true
+    }
+
+    fn set_current_group(&self, key: &GroupSimilarityBackfillKey, group_index: Option<usize>) {
+        if let Some(current_group) = self.active_jobs.lock().unwrap().get_mut(key) {
+            *current_group = group_index;
+        }
+    }
+
+    fn current_group(&self, key: &GroupSimilarityBackfillKey) -> Option<usize> {
+        self.active_jobs.lock().unwrap().get(key).copied().flatten()
     }
 
     fn finish(&self, key: &GroupSimilarityBackfillKey) {
@@ -1431,6 +1457,36 @@ fn emit_group_similarity_progress(window: &Window, progress: GroupSimilarityProg
     let _ = window.emit("group-similarity-progress", &progress);
 }
 
+fn group_similarity_scores_are_complete(scores: &[GroupSimilarityScore]) -> bool {
+    scores
+        .iter()
+        .all(|score| score.ssim_score.is_some() && score.error_message.is_none())
+}
+
+fn group_similarity_status(
+    run_id: &str,
+    grouping_distance: i32,
+    group_index: usize,
+    image_ids: &[i64],
+    status: &str,
+    message: impl Into<String>,
+) -> GroupSimilarityStatus {
+    let mut sorted_image_ids = image_ids.to_vec();
+    sorted_image_ids.sort_unstable();
+    GroupSimilarityStatus {
+        run_id: run_id.to_string(),
+        grouping_distance,
+        group_index,
+        image_ids: sorted_image_ids,
+        status: status.to_string(),
+        message: message.into(),
+    }
+}
+
+fn emit_group_similarity_status(window: &Window, status: &GroupSimilarityStatus) {
+    let _ = window.emit("group-similarity-status", status);
+}
+
 fn build_group_similarity_image_cache_jobs(
     run_id: &str,
     images: &[ImageSummary],
@@ -1895,6 +1951,88 @@ fn compute_persisted_group_similarity_scores(
     Ok(scores)
 }
 
+fn read_group_similarity_statuses(
+    repo: &Repository,
+    state: &GroupSimilarityBackfillState,
+    run_id: &str,
+    grouping_distance: i32,
+) -> Result<Vec<GroupSimilarityStatus>> {
+    let groups = read_comparison_groups(repo, run_id, Some(grouping_distance))?;
+    let backfill_key = GroupSimilarityBackfillKey {
+        run_id: run_id.to_string(),
+        grouping_distance,
+    };
+    let running_group_index = state.current_group(&backfill_key);
+
+    groups
+        .into_iter()
+        .map(|group| {
+            let image_ids = group
+                .members
+                .iter()
+                .map(|member| member.image_id)
+                .collect::<Vec<_>>();
+            if image_ids.len() < 2 {
+                return Ok(group_similarity_status(
+                    run_id,
+                    grouping_distance,
+                    group.group_index,
+                    &image_ids,
+                    "completed",
+                    "本组只有一张图片，无需进行组内 SSIM 比对",
+                ));
+            }
+
+            let persisted = (|| -> Result<bool> {
+                let mut images = read_images_by_ids(repo, run_id, &image_ids)?;
+                if images.len() != image_ids.len() {
+                    return Ok(false);
+                }
+                refresh_current_file_fingerprints(&mut images)?;
+                let cache_key = group_similarity_result_cache_key(run_id, &images);
+                Ok(read_persisted_group_similarity_scores(repo, &cache_key)?.is_some())
+            })();
+
+            match persisted {
+                Ok(true) => Ok(group_similarity_status(
+                    run_id,
+                    grouping_distance,
+                    group.group_index,
+                    &image_ids,
+                    "completed",
+                    "组内 SSIM 已比对完成并缓存",
+                )),
+                Ok(false) if running_group_index == Some(group.group_index) => {
+                    Ok(group_similarity_status(
+                        run_id,
+                        grouping_distance,
+                        group.group_index,
+                        &image_ids,
+                        "running",
+                        "正在后台比对本组 SSIM",
+                    ))
+                }
+                Ok(false) => Ok(group_similarity_status(
+                    run_id,
+                    grouping_distance,
+                    group.group_index,
+                    &image_ids,
+                    "pending",
+                    "尚未比对，正在等待后台 SSIM 计算",
+                )),
+                Err(error) => Ok(group_similarity_status(
+                    run_id,
+                    grouping_distance,
+                    group.group_index,
+                    &image_ids,
+                    "pending",
+                    format!("尚未完成 SSIM 比对：{error}"),
+                )),
+            }
+        })
+        .collect()
+}
+
 fn ordered_backfill_group_indices(
     groups: &[ComparisonGroup],
     after_group_indices: &[usize],
@@ -1927,6 +2065,9 @@ fn backfill_group_similarity_scores(
     run_id: &str,
     grouping_distance: i32,
     after_group_indices: &[usize],
+    window: &Window,
+    state: &GroupSimilarityBackfillState,
+    backfill_key: &GroupSimilarityBackfillKey,
 ) -> Result<()> {
     let groups = {
         let repo_lock = repo.lock().unwrap();
@@ -1941,28 +2082,80 @@ fn backfill_group_similarity_scores(
             .iter()
             .map(|member| member.image_id)
             .collect::<Vec<_>>();
-        let images = match {
+        state.set_current_group(backfill_key, Some(group_index));
+        emit_group_similarity_status(
+            window,
+            &group_similarity_status(
+                run_id,
+                grouping_distance,
+                group_index,
+                &image_ids,
+                "running",
+                "正在后台比对本组 SSIM",
+            ),
+        );
+
+        let images_result = {
             let repo_lock = repo.lock().unwrap();
             read_images_by_ids(&repo_lock, run_id, &image_ids)
-        } {
-            Ok(images) => images,
+        };
+        let final_status = match images_result {
+            Ok(images) => {
+                let request_id = format!("background-{run_id}-{grouping_distance}-{group_index}");
+                match compute_persisted_group_similarity_scores(
+                    repo,
+                    run_id,
+                    &images,
+                    &request_id,
+                    None,
+                    background_algorithm_pool(),
+                    false,
+                ) {
+                    Ok(scores) if group_similarity_scores_are_complete(&scores) => {
+                        group_similarity_status(
+                            run_id,
+                            grouping_distance,
+                            group_index,
+                            &image_ids,
+                            "completed",
+                            "组内 SSIM 已比对完成并缓存",
+                        )
+                    }
+                    Ok(_) => group_similarity_status(
+                        run_id,
+                        grouping_distance,
+                        group_index,
+                        &image_ids,
+                        "pending",
+                        "组内 SSIM 比对未全部完成，正在等待重试",
+                    ),
+                    Err(error) => {
+                        eprintln!("后台预计算第 {group_index} 组失败: {error}");
+                        group_similarity_status(
+                            run_id,
+                            grouping_distance,
+                            group_index,
+                            &image_ids,
+                            "pending",
+                            format!("组内 SSIM 比对失败，正在等待重试：{error}"),
+                        )
+                    }
+                }
+            }
             Err(error) => {
                 eprintln!("后台读取第 {group_index} 组失败: {error}");
-                continue;
+                group_similarity_status(
+                    run_id,
+                    grouping_distance,
+                    group_index,
+                    &image_ids,
+                    "pending",
+                    format!("组内 SSIM 比对失败，正在等待重试：{error}"),
+                )
             }
         };
-        let request_id = format!("background-{run_id}-{grouping_distance}-{group_index}");
-        if let Err(error) = compute_persisted_group_similarity_scores(
-            repo,
-            run_id,
-            &images,
-            &request_id,
-            None,
-            background_algorithm_pool(),
-            false,
-        ) {
-            eprintln!("后台预计算第 {group_index} 组失败: {error}");
-        }
+        emit_group_similarity_status(window, &final_status);
+        state.set_current_group(backfill_key, None);
     }
     Ok(())
 }
@@ -2175,9 +2368,16 @@ pub async fn get_group_similarity_scores(
     run_id: String,
     image_ids: Vec<i64>,
     request_id: String,
+    grouping_distance: i32,
+    group_index: usize,
     window: Window,
     repo: State<'_, Arc<Mutex<Repository>>>,
 ) -> Result<Vec<GroupSimilarityScore>> {
+    if !(0..=24).contains(&grouping_distance) || group_index == 0 {
+        return Err(AppError::ValidationError(
+            "分组宽松度或分组序号无效".to_string(),
+        ));
+    }
     let images = {
         let repo_lock = repo.lock().unwrap();
         let run = repo_lock
@@ -2187,20 +2387,115 @@ pub async fn get_group_similarity_scores(
         read_images_by_ids(&repo_lock, &run_id, &image_ids)?
     };
     let repo = Arc::clone(repo.inner());
-
-    tauri::async_runtime::spawn_blocking(move || {
+    emit_group_similarity_status(
+        &window,
+        &group_similarity_status(
+            &run_id,
+            grouping_distance,
+            group_index,
+            &image_ids,
+            "running",
+            "正在优先比对当前分组 SSIM",
+        ),
+    );
+    let progress_window = window.clone();
+    let compute_run_id = run_id.clone();
+    let compute_result = tauri::async_runtime::spawn_blocking(move || {
         compute_persisted_group_similarity_scores(
             &repo,
-            &run_id,
+            &compute_run_id,
             &images,
             &request_id,
-            Some(&window),
+            Some(&progress_window),
             algorithm_pool(),
             true,
         )
     })
+    .await;
+
+    match compute_result {
+        Ok(Ok(scores)) if group_similarity_scores_are_complete(&scores) => {
+            emit_group_similarity_status(
+                &window,
+                &group_similarity_status(
+                    &run_id,
+                    grouping_distance,
+                    group_index,
+                    &image_ids,
+                    "completed",
+                    "组内 SSIM 已比对完成并缓存",
+                ),
+            );
+            Ok(scores)
+        }
+        Ok(Ok(scores)) => {
+            emit_group_similarity_status(
+                &window,
+                &group_similarity_status(
+                    &run_id,
+                    grouping_distance,
+                    group_index,
+                    &image_ids,
+                    "pending",
+                    "组内 SSIM 比对未全部完成，正在等待重试",
+                ),
+            );
+            Ok(scores)
+        }
+        Ok(Err(error)) => {
+            emit_group_similarity_status(
+                &window,
+                &group_similarity_status(
+                    &run_id,
+                    grouping_distance,
+                    group_index,
+                    &image_ids,
+                    "pending",
+                    format!("组内 SSIM 比对失败，正在等待重试：{error}"),
+                ),
+            );
+            Err(error)
+        }
+        Err(error) => {
+            let message = format!("组内 SSIM 任务执行失败: {error}");
+            emit_group_similarity_status(
+                &window,
+                &group_similarity_status(
+                    &run_id,
+                    grouping_distance,
+                    group_index,
+                    &image_ids,
+                    "pending",
+                    format!("{message}，正在等待重试"),
+                ),
+            );
+            Err(AppError::Internal(message))
+        }
+    }
+}
+
+/// 获取正式任务中全部自动分组的 SSIM 缓存与后台队列状态。
+#[tauri::command]
+pub async fn get_group_similarity_statuses(
+    run_id: String,
+    grouping_distance: i32,
+    repo: State<'_, Arc<Mutex<Repository>>>,
+    state: State<'_, Arc<GroupSimilarityBackfillState>>,
+) -> Result<Vec<GroupSimilarityStatus>> {
+    if !(0..=24).contains(&grouping_distance) {
+        return Err(AppError::ValidationError(
+            "分组宽松度必须位于 0 到 24 之间".to_string(),
+        ));
+    }
+
+    let repo = Arc::clone(repo.inner());
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo_lock = repo.lock().unwrap();
+        read_group_similarity_statuses(&repo_lock, &state, &run_id, grouping_distance)
+    })
     .await
-    .map_err(|error| AppError::Internal(format!("组内 SSIM 任务执行失败: {error}")))?
+    .map_err(|error| AppError::Internal(format!("读取组内 SSIM 状态失败: {error}")))?
 }
 
 /// 当前组完成后，以单线程低优先级补算同一正式任务的其他分组。
@@ -2209,6 +2504,7 @@ pub async fn start_group_similarity_backfill(
     run_id: String,
     grouping_distance: i32,
     after_group_indices: Vec<usize>,
+    window: Window,
     repo: State<'_, Arc<Mutex<Repository>>>,
     state: State<'_, Arc<GroupSimilarityBackfillState>>,
 ) -> Result<()> {
@@ -2242,12 +2538,18 @@ pub async fn start_group_similarity_backfill(
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn(async move {
         let backfill_repo = Arc::clone(&repo);
+        let backfill_state = Arc::clone(&state);
+        let backfill_key = key.clone();
+        let status_window = window.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
             backfill_group_similarity_scores(
                 &backfill_repo,
                 &run_id,
                 grouping_distance,
                 &after_group_indices,
+                &status_window,
+                &backfill_state,
+                &backfill_key,
             )
         })
         .await;
@@ -3404,6 +3706,22 @@ mod tests {
         assert!(!state.try_start(key.clone()));
         state.finish(&key);
         assert!(state.try_start(key));
+    }
+
+    #[test]
+    fn background_group_scheduler_tracks_the_group_currently_being_compared() {
+        let state = GroupSimilarityBackfillState::default();
+        let key = GroupSimilarityBackfillKey {
+            run_id: "run-1".to_string(),
+            grouping_distance: 10,
+        };
+
+        assert!(state.try_start(key.clone()));
+        assert_eq!(state.current_group(&key), None);
+        state.set_current_group(&key, Some(3));
+        assert_eq!(state.current_group(&key), Some(3));
+        state.set_current_group(&key, None);
+        assert_eq!(state.current_group(&key), None);
     }
 
     #[test]

@@ -6,6 +6,7 @@ import type {
   ComparisonResultRow,
   ComparisonGroup,
   GroupSimilarityScore,
+  GroupSimilarityStatus,
   ImageRecycleOutcome,
   RunStatusResponse,
   ComparisonRunHistoryItem
@@ -38,12 +39,27 @@ export async function getComparisonGroups(
 export async function getGroupSimilarityScores(
   runId: string,
   imageIds: number[],
-  requestId: string
+  requestId: string,
+  groupingDistance: number,
+  groupIndex: number
 ): Promise<GroupSimilarityScore[]> {
   return await invoke<GroupSimilarityScore[]>('get_group_similarity_scores', {
     runId,
     imageIds,
-    requestId
+    requestId,
+    groupingDistance,
+    groupIndex
+  })
+}
+
+/** 获取正式任务中全部自动分组的 SSIM 缓存与后台状态 */
+export async function getGroupSimilarityStatuses(
+  runId: string,
+  groupingDistance: number
+): Promise<GroupSimilarityStatus[]> {
+  return await invoke<GroupSimilarityStatus[]>('get_group_similarity_statuses', {
+    runId,
+    groupingDistance
   })
 }
 

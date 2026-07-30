@@ -357,6 +357,18 @@ export interface GroupSimilarityProgress {
   skipped_pairs: number
 }
 
+export type GroupSimilarityStatusValue = 'pending' | 'running' | 'completed'
+
+/** 正式任务中一个相似分组的 SSIM 后台状态 */
+export interface GroupSimilarityStatus {
+  run_id: string
+  grouping_distance: number
+  group_index: number
+  image_ids: number[]
+  status: GroupSimilarityStatusValue
+  message: string
+}
+
 /** 按图片回收的单项结果 */
 export interface ImageRecycleOutcome {
   image_id: number

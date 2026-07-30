@@ -71,6 +71,21 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="SSIM" width="62" align="center">
+          <template #default="{ row }">
+            <el-tooltip :content="getGroupSsimStatus(row).message" placement="right">
+              <span
+                data-test="group-ssim-status"
+                class="ssim-status-light"
+                :class="`is-${getGroupSsimStatus(row).status}`"
+                role="status"
+                tabindex="0"
+                :aria-label="`SSIM 状态：${getGroupSsimStatus(row).message}`"
+              />
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
         <el-table-column prop="group_index" label="组序号" width="90" align="center"/>
         <el-table-column label="预览" width="84" align="center">
           <template #default="{ row }">
@@ -166,6 +181,10 @@ function handleGroupingInput(value: number | number[]) {
 
 function handleRowClick(group: ComparisonGroup) {
   store.selectGroup(group.group_index)
+}
+
+function getGroupSsimStatus(group: ComparisonGroup) {
+  return store.getGroupSimilarityStatus(group)
 }
 
 function handleMergeClick() {
@@ -347,6 +366,37 @@ function getRowClassName({ row }: { row: ComparisonGroup }) {
     width: 0;
     padding-left: 0;
     overflow: hidden;
+  }
+}
+
+.ssim-status-light {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  vertical-align: middle;
+  cursor: help;
+  transition: background-color 180ms ease, box-shadow 180ms ease;
+
+  &.is-completed {
+    background: #67c23a;
+    box-shadow: 0 0 0 3px rgb(103 194 58 / 18%);
+  }
+
+  &.is-running {
+    background: #e6a23c;
+    box-shadow: 0 0 0 3px rgb(230 162 60 / 22%);
+  }
+
+  &.is-pending {
+    background: #f56c6c;
+    box-shadow: 0 0 0 3px rgb(245 108 108 / 18%);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #409eff;
+    outline-offset: 3px;
   }
 }
 

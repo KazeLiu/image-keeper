@@ -4,8 +4,6 @@ import {
   parseStoredRecognitionThreshold,
   precisionSliderValueToThreshold,
   precisionThresholdToSliderValue,
-  qualitySliderValueToThreshold,
-  qualityThresholdToSliderValue,
   settingsSliderValueToThreshold,
   settingsThresholdToSliderValue
 } from './similarity'
@@ -13,20 +11,6 @@ import {
 describe('similarity presentation', () => {
   it('shows the direct ssim value instead of a percentage', () => {
     expect(formatSsim(0.9963142)).toBe('0.996314')
-  })
-
-  it('preserves the existing quality ranges and only uses 0.0001 above 0.99', () => {
-    expect(qualitySliderValueToThreshold(0)).toBe(0.8)
-    expect(qualitySliderValueToThreshold(1)).toBe(0.81)
-    expect(qualitySliderValueToThreshold(18)).toBe(0.98)
-    expect(qualitySliderValueToThreshold(19)).toBe(0.9805)
-    expect(qualitySliderValueToThreshold(37)).toBe(0.9895)
-    expect(qualitySliderValueToThreshold(38)).toBe(0.99)
-    expect(qualitySliderValueToThreshold(39)).toBe(0.9901)
-    expect(qualitySliderValueToThreshold(137)).toBe(0.9999)
-    expect(qualitySliderValueToThreshold(138)).toBe(1)
-    expect(qualityThresholdToSliderValue(0.9901)).toBe(39)
-    expect(qualityThresholdToSliderValue(0.9999)).toBe(137)
   })
 
   it('keeps 0.001 recognition steps below 0.99 and uses 0.0001 above it', () => {

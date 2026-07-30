@@ -7,6 +7,13 @@ mod db;
 mod error;
 
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
+
+const MAIN_WINDOW_LABEL: &str = "main";
+
+fn should_exit_after_close_request(window_label: &str) -> bool {
+    window_label == MAIN_WINDOW_LABEL
+}
 
 fn main() {
     // 初始化数据库连接
@@ -23,6 +30,13 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. })
+                && should_exit_after_close_request(window.label())
+            {
+                window.app_handle().exit(0);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // TODO: 重新实现命令
             // commands::scan::start_scan,
@@ -51,6 +65,7 @@ fn main() {
             commands::comparison::get_comparison_results,
             commands::comparison::get_comparison_groups,
             commands::comparison::get_group_similarity_scores,
+            commands::comparison::get_group_similarity_statuses,
             commands::comparison::start_group_similarity_backfill,
             commands::comparison::get_run_status,
             commands::comparison::list_comparison_runs,
@@ -69,4 +84,16 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_main_window_close_exits_the_entire_application() {
+        assert!(should_exit_after_close_request("main"));
+        assert!(!should_exit_after_close_request("difference-finder"));
+        assert!(!should_exit_after_close_request("image-metrics-test"));
+    }
 }

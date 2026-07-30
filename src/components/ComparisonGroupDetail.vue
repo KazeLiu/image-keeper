@@ -6,7 +6,7 @@
           <div class="detail-title-block">
             <div class="header-title">第 {{ group.group_index }} 组</div>
             <div class="threshold-summary">
-              原图拆分阈值 {{ formatSsimThreshold(originalRecognitionThreshold) }} · 自动勾选阈值 {{ formatSsimThreshold(store.qualitySelectionThreshold) }}
+              原图拆分阈值 {{ formatSsimThreshold(originalRecognitionThreshold) }}
             </div>
           </div>
           <div class="detail-actions">
@@ -25,7 +25,7 @@
               v-model:visible="thresholdPopoverVisible"
               trigger="click"
               placement="bottom-end"
-              :width="500"
+              :width="440"
             >
               <template #reference>
                 <el-button :icon="Setting" plain size="small">
@@ -54,29 +54,8 @@
                   </div>
                 </div>
 
-                <div class="quality-control-card">
-                  <div class="quality-heading">
-                    <span>自动勾选删除阈值</span>
-                    <span class="quality-value">{{ formatSsimThreshold(store.qualitySelectionThreshold) }}</span>
-                  </div>
-                  <el-slider
-                    class="quality-slider"
-                    :model-value="qualitySliderValue"
-                    :min="0"
-                    :max="138"
-                    :step="1"
-                    :marks="qualitySliderMarks"
-                    :format-tooltip="formatQualitySliderTooltip"
-                    @input="handleQualityThresholdInput"
-                    @change="handleQualityThresholdChange"
-                  />
-                  <div class="quality-help">
-                    只作用于已经归到某张原图下的候选图。候选图与该原图的标准 SSIM 达到阈值，并且总像素少于原图 90%、文件大小低于原图 75%，或被手动设为缩略图时，才会自动勾选。调低会勾选更多，调高会更保守；这里只改变自动勾选，不改变图片归属。
-                  </div>
-                </div>
-
                 <div class="quality-help">
-                  两个阈值只改变判断规则，不改变标准 SSIM 算法或已计算数值。组内 SSIM 固定使用完整较小分辨率，最多 4 路并行计算。
+                  此阈值只改变原图和缩略图的归属，不改变标准 SSIM 算法、已计算数值或复选框状态。组内 SSIM 固定使用完整较小分辨率，最多 4 路并行计算。
                 </div>
               </div>
             </el-popover>
@@ -141,7 +120,7 @@
         v-if="!isLoadingCrossCheck && hiddenOriginalRowCount > 0"
         class="detail-filter-bar"
       >
-        <span>已隐藏 {{ hiddenOriginalRowCount }} 张暂无低质量候选的原图</span>
+        <span>已隐藏 {{ hiddenOriginalRowCount }} 张暂无缩略图的原图</span>
         <el-switch
           v-model="showEmptyOriginalRows"
           size="small"
@@ -152,7 +131,7 @@
       <el-empty
         v-if="!isLoadingCrossCheck && visibleOriginalRows.length === 0"
         class="no-candidate-empty"
-        description="本组暂无可删除候选"
+        description="本组暂无缩略图"
         :image-size="72"
       />
 
@@ -168,13 +147,13 @@
       >
         <el-table-column type="expand" width="58">
           <template #header>
-            <el-tooltip content="全选本组可删除候选" placement="top">
+            <el-tooltip content="全选本组全部缩略图" placement="top">
               <el-checkbox
                 data-test="select-all-delete"
                 :model-value="allDeleteCandidatesChecked"
                 :indeterminate="someDeleteCandidatesChecked"
-                :disabled="selectableDeleteCandidates.length === 0"
-                aria-label="全选本组可删除候选"
+                :disabled="thumbnailCandidates.length === 0"
+                aria-label="全选本组全部缩略图"
                 @change="handleSelectAllDeleteChange"
                 @click.stop
               />
@@ -184,7 +163,7 @@
             <div class="thumbnail-panel">
               <el-empty
                 v-if="row.candidates.length === 0"
-                description="这张原图下暂无低质量候选"
+                description="这张原图下暂无缩略图"
                 :image-size="52"
               />
               <el-table
@@ -200,7 +179,6 @@
                   <template #default="{ row: candidate }">
                     <el-checkbox
                       :model-value="isCheckedForDelete(candidate.member.image_id)"
-                      :disabled="!candidate.shouldDelete"
                       @change="handleCandidateDeleteChange(candidate, $event)"
                       @click.stop
                     >
@@ -250,16 +228,8 @@
                 </el-table-column>
 
                 <el-table-column label="判断" width="150" align="center">
-                  <template #default="{ row: candidate }">
-                    <el-tooltip :content="candidate.reason" placement="right-start">
-                      <el-tag
-                        :type="candidate.shouldDelete ? 'danger' : 'info'"
-                        size="small"
-                        effect="light"
-                      >
-                        {{ candidate.shouldDelete ? '建议删除' : '候选缩略图' }}
-                      </el-tag>
-                    </el-tooltip>
+                  <template #default>
+                    <el-tag type="info" size="small" effect="light">缩略图</el-tag>
                   </template>
                 </el-table-column>
 
@@ -300,7 +270,7 @@
                     </el-button>
                   </template>
                 </el-table-column>
-                <el-table-column label="路径操作" width="104" align="center">
+                <el-table-column label="路径操作" width="136" align="center">
                   <template #default="{ row: candidate }">
                     <div class="path-actions">
                       <el-button
@@ -321,6 +291,21 @@
                       >
                         打开
                       </el-button>
+                      <el-tooltip
+                        :content="candidate.member.file_path"
+                        placement="top-end"
+                        :show-after="160"
+                      >
+                        <el-button
+                          class="compact-action-button"
+                          type="primary"
+                          link
+                          data-test="view-full-path"
+                          @click.stop="showFullPath(candidate.member)"
+                        >
+                          查看
+                        </el-button>
+                      </el-tooltip>
                     </div>
                   </template>
                 </el-table-column>
@@ -397,7 +382,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="低质量候选" width="96" align="center">
+        <el-table-column label="缩略图" width="96" align="center">
           <template #default="{ row }">
             <span>{{ row.candidates.length }}</span>
           </template>
@@ -416,7 +401,7 @@
             </el-button>
           </template>
         </el-table-column>
-        <el-table-column label="路径操作" width="104" align="center">
+        <el-table-column label="路径操作" width="136" align="center">
           <template #default="{ row }">
             <div class="path-actions">
               <el-button
@@ -437,6 +422,21 @@
               >
                 打开
               </el-button>
+              <el-tooltip
+                :content="row.member.file_path"
+                placement="top-end"
+                :show-after="160"
+              >
+                <el-button
+                  class="compact-action-button"
+                  type="primary"
+                  link
+                  data-test="view-full-path"
+                  @click.stop="showFullPath(row.member)"
+                >
+                  查看
+                </el-button>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>
@@ -502,13 +502,11 @@ import {
   formatSsim,
   parseStoredRecognitionThreshold,
   precisionSliderValueToThreshold,
-  precisionThresholdToSliderValue,
-  qualitySliderValueToThreshold,
-  qualityThresholdToSliderValue
+  precisionThresholdToSliderValue
 } from '@/features/similarity'
 
 const store = useComparisonStore()
-const candidateSsimColumnHelp = '候选图与当前所在行原图的标准 SSIM。该值用于自动勾选删除阈值，不用于决定原图拆分。'
+const candidateSsimColumnHelp = '候选图与当前所在行原图的标准 SSIM，用于确认它被归到哪张原图下。'
 const originalBasisColumnHelp = '说明图片为何被列为原图。自动识别会综合分辨率、画面比例和原图拆分阈值；手动设置优先。'
 const ORIGINAL_RECOGNITION_THRESHOLD_KEY = 'imagekeeper:original-recognition-ssim'
 const LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
@@ -528,8 +526,6 @@ interface ThumbnailCandidate {
   member: ComparisonGroupMember
   reference: ComparisonGroupMember
   similarity?: number | null
-  shouldDelete: boolean
-  reason: string
 }
 
 const viewerVisible = ref(false)
@@ -552,13 +548,6 @@ let unlistenGroupSimilarityProgress: UnlistenFn | null = null
 let groupSimilarityProgressListenerPromise: Promise<void> | null = null
 
 const group = computed(() => store.selectedGroup)
-const qualitySliderMarks = {
-  0: '0.80',
-  18: '0.98',
-  38: '0.99',
-  138: '1.00'
-}
-
 const originalRecognitionMarks = {
   0: '0.95',
   30: '0.98',
@@ -566,7 +555,6 @@ const originalRecognitionMarks = {
   140: '1.00'
 }
 
-const qualitySliderValue = computed(() => thresholdToSliderValue(store.qualitySelectionThreshold))
 const originalRecognitionSliderValue = computed(() =>
   precisionThresholdToSliderValue(originalRecognitionThreshold.value)
 )
@@ -590,23 +578,20 @@ const visibleOriginalRows = computed(() =>
 const hiddenOriginalRowCount = computed(() =>
   originalRows.value.filter((row) => row.candidates.length === 0).length
 )
-const deleteCandidates = computed(() => originalRows.value.flatMap((row) => row.candidates))
-const selectableDeleteCandidates = computed(() =>
-  deleteCandidates.value.filter((candidate) => candidate.shouldDelete)
-)
+const thumbnailCandidates = computed(() => originalRows.value.flatMap((row) => row.candidates))
 const checkedDeleteCandidates = computed(() =>
-  deleteCandidates.value.filter((candidate) =>
+  thumbnailCandidates.value.filter((candidate) =>
     store.checkedImageIds.includes(candidate.member.image_id)
   )
 )
 const allDeleteCandidatesChecked = computed(() =>
-  selectableDeleteCandidates.value.length > 0
-  && selectableDeleteCandidates.value.every((candidate) =>
+  thumbnailCandidates.value.length > 0
+  && thumbnailCandidates.value.every((candidate) =>
     store.checkedImageIds.includes(candidate.member.image_id)
   )
 )
 const someDeleteCandidatesChecked = computed(() =>
-  selectableDeleteCandidates.value.some((candidate) =>
+  thumbnailCandidates.value.some((candidate) =>
     store.checkedImageIds.includes(candidate.member.image_id)
   ) && !allDeleteCandidatesChecked.value
 )
@@ -670,15 +655,6 @@ const similarityScoreMap = computed(() => {
   return scoreMap
 })
 
-const suggestedSelectionKey = computed(() =>
-  originalRows.value
-    .flatMap((row) => row.candidates)
-    .filter((candidate) => candidate.shouldDelete)
-    .map((candidate) => candidate.member.image_id)
-    .sort((left, right) => left - right)
-    .join(',')
-)
-
 const viewerMember = computed(() => {
   const members = group.value?.members || []
   return members[viewerIndex.value] || null
@@ -705,10 +681,15 @@ watch(
 )
 
 watch(
-  [suggestedSelectionKey, isLoadingCrossCheck],
-  ([, loading]) => {
-    if (loading) return
-    applyAutoQualitySelection()
+  () => thumbnailCandidates.value.map((candidate) => candidate.member.image_id).sort((a, b) => a - b).join(','),
+  () => {
+    const currentMemberIds = new Set(group.value?.members.map((member) => member.image_id) || [])
+    const currentThumbnailIds = new Set(
+      thumbnailCandidates.value.map((candidate) => candidate.member.image_id)
+    )
+    store.checkedImageIds = store.checkedImageIds.filter(
+      (imageId) => !currentMemberIds.has(imageId) || currentThumbnailIds.has(imageId)
+    )
   },
   { immediate: true }
 )
@@ -766,7 +747,6 @@ function getOriginalRowClassName({ row }: { row: OriginalRow }) {
 function getCandidateRowClassName({ row }: { row: ThumbnailCandidate }) {
   const classes: string[] = ['candidate-row']
   if (row.member.image_id === store.selectedMemberId) classes.push('active-member-row')
-  if (row.shouldDelete) classes.push('low-quality-row')
   return classes.join(' ')
 }
 
@@ -823,13 +803,15 @@ async function openFolder(member: ComparisonGroupMember) {
   }
 }
 
+function showFullPath(member: ComparisonGroupMember) {
+  void ElMessageBox.alert(member.file_path, '完整路径', {
+    confirmButtonText: '关闭'
+  })
+}
+
 function formatSimilarity(value?: number | null) {
   if (value === undefined || value === null) return '—'
   return formatSsim(value)
-}
-
-function formatQualitySliderTooltip(value: number) {
-  return formatSsimThreshold(qualitySliderValueToThreshold(value))
 }
 
 function formatSsimThreshold(value: number) {
@@ -844,20 +826,6 @@ function handleOriginalRecognitionInput(value: number | number[]) {
   const nextValue = Array.isArray(value) ? value[0] : value
   originalRecognitionThreshold.value = precisionSliderValueToThreshold(nextValue)
   rememberOriginalRecognitionThreshold(originalRecognitionThreshold.value)
-}
-
-function handleQualityThresholdInput(value: number | number[]) {
-  const nextValue = Array.isArray(value) ? value[0] : value
-  store.setQualitySelectionThreshold(qualitySliderValueToThreshold(nextValue))
-  applyAutoQualitySelection()
-}
-
-function handleQualityThresholdChange() {
-  ElMessage.info('已按当前阈值更新勾选')
-}
-
-function thresholdToSliderValue(threshold: number) {
-  return qualityThresholdToSliderValue(threshold)
 }
 
 function formatFileSize(bytes: number) {
@@ -946,24 +914,47 @@ async function loadGroupCrossCheckScores() {
   }
   if (currentGroup.members.length < 2) {
     isLoadingCrossCheck.value = false
+    store.markGroupSimilarityStatus(
+      currentGroup,
+      'completed',
+      '本组只有一张图片，无需进行组内 SSIM 比对'
+    )
     scheduleGroupSimilarityBackfill(currentGroup)
     return
   }
 
   isLoadingCrossCheck.value = true
+  store.markGroupSimilarityStatus(currentGroup, 'running', '正在优先比对当前分组 SSIM')
   try {
     await ensureGroupSimilarityProgressListener()
     const scores = await getGroupSimilarityScores(
       store.currentRunId,
       currentGroup.members.map((member) => member.image_id),
-      requestKey
+      requestKey,
+      store.appliedGroupingDistance,
+      currentGroup.group_index
     )
     if (requestId === crossCheckRequestId) {
       groupSimilarityScores.value = scores
+      const completed = scores.every(
+        (score) => typeof score.ssim_score === 'number' && !score.error_message
+      )
+      store.markGroupSimilarityStatus(
+        currentGroup,
+        completed ? 'completed' : 'pending',
+        completed
+          ? '组内 SSIM 已比对完成并缓存'
+          : '组内 SSIM 比对未全部完成，正在等待重试'
+      )
       scheduleGroupSimilarityBackfill(currentGroup)
     }
   } catch (error) {
     if (requestId === crossCheckRequestId) {
+      store.markGroupSimilarityStatus(
+        currentGroup,
+        'pending',
+        '组内 SSIM 比对失败，正在等待重试'
+      )
       console.warn('组内交叉相似度计算失败:', error)
       ElMessage.warning('组内交叉验证失败，暂时使用已有参考关系')
     }
@@ -1000,7 +991,6 @@ function markAsOriginal(imageId: number) {
   }
   hasManualAssignmentChanges.value = true
   removeCheckedImage(imageId)
-  applyAutoQualitySelection()
 }
 
 function markAsThumbnail(imageId: number) {
@@ -1009,7 +999,6 @@ function markAsThumbnail(imageId: number) {
     manualThumbnailIds.value = [...manualThumbnailIds.value, imageId]
   }
   hasManualAssignmentChanges.value = true
-  applyAutoQualitySelection()
 }
 
 function isCheckedForDelete(imageId: number) {
@@ -1029,7 +1018,7 @@ function handleCandidateDeleteChange(candidate: ThumbnailCandidate, checked: str
 
 function handleSelectAllDeleteChange(checked: string | number | boolean) {
   const currentCandidateIds = new Set(
-    deleteCandidates.value.map((candidate) => candidate.member.image_id)
+    thumbnailCandidates.value.map((candidate) => candidate.member.image_id)
   )
   const checkedOutsideCurrentGroup = store.checkedImageIds.filter(
     (imageId) => !currentCandidateIds.has(imageId)
@@ -1037,20 +1026,13 @@ function handleSelectAllDeleteChange(checked: string | number | boolean) {
   store.checkedImageIds = checked
     ? [
         ...checkedOutsideCurrentGroup,
-        ...selectableDeleteCandidates.value.map((candidate) => candidate.member.image_id)
+        ...thumbnailCandidates.value.map((candidate) => candidate.member.image_id)
       ]
     : checkedOutsideCurrentGroup
 }
 
 function removeCheckedImage(imageId: number) {
   store.checkedImageIds = store.checkedImageIds.filter((id) => id !== imageId)
-}
-
-function applyAutoQualitySelection() {
-  store.checkedImageIds = originalRows.value
-    .flatMap((row) => row.candidates)
-    .filter((candidate) => candidate.shouldDelete)
-    .map((candidate) => candidate.member.image_id)
 }
 
 function buildOriginalRows(members: ComparisonGroupMember[]): OriginalRow[] {
@@ -1079,7 +1061,6 @@ function buildOriginalRows(members: ComparisonGroupMember[]): OriginalRow[] {
   for (const row of rows) {
     row.candidates.sort((left, right) => {
       return (
-        Number(right.shouldDelete) - Number(left.shouldDelete) ||
         (right.similarity || 0) - (left.similarity || 0) ||
         left.member.relative_path.localeCompare(right.member.relative_path)
       )
@@ -1146,26 +1127,12 @@ function buildThumbnailCandidate(
   const storedSimilarity = getStoredSimilarityForReference(member, reference)
   const crossSimilarity = getCrossSimilarity(member.image_id, reference.image_id)
   const activeSimilarity = crossSimilarity ?? storedSimilarity
-  const lowerResolution = getPixels(member) < getPixels(reference) * 0.9
-  const smallerFile = member.file_size < reference.file_size * 0.75
-  const manuallyDowngraded = manualThumbnailIds.value.includes(member.image_id)
-  const similarEnough = typeof activeSimilarity === 'number' && activeSimilarity >= store.qualitySelectionThreshold
-  const shouldDelete = similarEnough && (lowerResolution || smallerFile || manuallyDowngraded)
 
   return {
     id: `candidate-${reference.image_id}-${member.image_id}`,
     member,
     reference,
-    similarity: activeSimilarity,
-    shouldDelete,
-    reason: getCandidateReason({
-      lowerResolution,
-      smallerFile,
-      manuallyDowngraded,
-      hasSimilarity: typeof activeSimilarity === 'number',
-      similarEnough,
-      hasCrossSimilarity: typeof crossSimilarity === 'number'
-    })
+    similarity: activeSimilarity
   }
 }
 
@@ -1210,26 +1177,6 @@ function findReferenceOriginal(member: ComparisonGroupMember, originals: Compari
   if (sameReferenceName) return sameReferenceName
 
   return [...originals].sort((left, right) => compareQuality(right, left))[0]
-}
-
-function getCandidateReason(flags: {
-  lowerResolution: boolean
-  smallerFile: boolean
-  manuallyDowngraded: boolean
-  hasSimilarity: boolean
-  similarEnough: boolean
-  hasCrossSimilarity: boolean
-}) {
-  if (!flags.hasSimilarity) return '缺少与当前原图的标准 SSIM，未自动勾选'
-  if (!flags.similarEnough) return '未达到当前勾选阈值'
-  if (flags.manuallyDowngraded) return '你手动设为缩略图'
-  if (flags.hasCrossSimilarity && flags.lowerResolution && flags.smallerFile) return '交叉验证最相似，且分辨率和体积都更低'
-  if (flags.hasCrossSimilarity && flags.lowerResolution) return '交叉验证最相似，且分辨率更低'
-  if (flags.hasCrossSimilarity && flags.smallerFile) return '交叉验证最相似，且文件体积更小'
-  if (flags.lowerResolution && flags.smallerFile) return '分辨率和体积都更低'
-  if (flags.lowerResolution) return '分辨率更低'
-  if (flags.smallerFile) return '文件体积更小'
-  return '大小接近，默认不自动删除'
 }
 
 function getCrossSimilarity(leftImageId: number, rightImageId: number) {
@@ -1319,13 +1266,15 @@ function resetImageViewerZoom() {
 
 .detail-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
 }
 
 .detail-title-block {
-  min-width: 0;
+  min-width: max-content;
+  flex: 1 1 120px;
 }
 
 .header-title {
@@ -1344,9 +1293,15 @@ function resetImageViewerZoom() {
 
 .detail-actions {
   display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
-  flex: 0 0 auto;
+
+  :deep(.el-button + .el-button) {
+    margin-left: 0;
+  }
 }
 
 .assignment-notice {
@@ -1661,10 +1616,6 @@ function resetImageViewerZoom() {
 
 :deep(.original-row td:first-child) {
   border-left: 3px solid #67c23a;
-}
-
-:deep(.low-quality-row td:first-child) {
-  border-left: 3px solid #f56c6c;
 }
 
 :deep(.cluster-0 td) {
