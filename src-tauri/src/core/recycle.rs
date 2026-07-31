@@ -1,9 +1,101 @@
 use crate::db::models::{ActionStatus, FolderRole};
 use crate::db::repository::Repository;
 use crate::error::{AppError, Result};
-use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// 将确认后的文件交给系统回收站实现，并返回原路径作为日志引用。
+fn dispatch_system_recycle<F>(source_path: &Path, recycle: F) -> Result<PathBuf>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    recycle(source_path)?;
+    Ok(source_path.to_path_buf())
+}
+
+#[cfg(target_os = "windows")]
+/// 在专用 STA 线程中将文件移入 Windows 系统回收站。
+fn send_file_to_system_recycle_bin(source_path: &Path) -> Result<()> {
+    let source_path = source_path.to_path_buf();
+    let result = std::thread::spawn(move || recycle_on_sta_thread(&source_path))
+        .join()
+        .map_err(|_| AppError::FileSystem("Windows 回收站线程异常退出".to_string()))?;
+
+    result.map_err(|error| AppError::FileSystem(format!("移入 Windows 回收站失败: {error}")))
+}
+
+#[cfg(target_os = "windows")]
+/// 返回要求系统回收而不是静默永久删除的 Shell 操作 flags。
+fn system_recycle_operation_flags() -> windows::Win32::UI::Shell::FILEOPERATION_FLAGS {
+    use windows::Win32::UI::Shell::{
+        FOFX_RECYCLEONDELETE, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+    };
+
+    FOFX_RECYCLEONDELETE | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
+}
+
+#[cfg(target_os = "windows")]
+/// 在独立 STA 线程中执行 Windows Shell 回收站操作。
+fn recycle_on_sta_thread(source_path: &Path) -> std::result::Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName,
+    };
+
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(|error| format!("初始化 COM 失败: {error}"))?;
+    let _com_apartment = ComApartment;
+
+    let wide_path = source_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let operation: IFileOperation =
+        unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|error| format!("创建 Windows 文件操作失败: {error}"))?;
+    unsafe { operation.SetOperationFlags(system_recycle_operation_flags()) }
+        .map_err(|error| format!("设置 Windows 回收站操作标志失败: {error}"))?;
+    let item: IShellItem = unsafe { SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None) }
+        .map_err(|error| format!("读取待回收文件失败: {error}"))?;
+    unsafe { operation.DeleteItem(&item, None) }
+        .map_err(|error| format!("加入 Windows 回收队列失败: {error}"))?;
+    unsafe { operation.PerformOperations() }
+        .map_err(|error| format!("执行 Windows 回收操作失败: {error}"))?;
+
+    let aborted = unsafe { operation.GetAnyOperationsAborted() }
+        .map_err(|error| format!("读取 Windows 回收操作状态失败: {error}"))?;
+    if aborted.as_bool() {
+        return Err("Windows 回收站操作被中止".to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+/// 在线程退出时释放 COM apartment。
+struct ComApartment;
+
+#[cfg(target_os = "windows")]
+impl Drop for ComApartment {
+    /// 释放当前线程的 COM apartment。
+    fn drop(&mut self) {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+/// 非 Windows 平台拒绝执行只适用于 Windows 的系统回收操作。
+fn send_file_to_system_recycle_bin(_source_path: &Path) -> Result<()> {
+    Err(AppError::ValidationError(
+        "当前平台不支持 Windows 系统回收站".to_string(),
+    ))
+}
 
 /// 回收站引擎 - Phase 7: 执行前复验与安全回收
 pub struct RecycleEngine<'a> {
@@ -109,10 +201,16 @@ impl<'a> RecycleEngine<'a> {
         Ok(())
     }
 
-    /// Phase 7.2: 安全回收
-    ///
-    /// 移动文件到 .recycle/<runId>/... 并记录操作日志
+    /// 将文件移入操作系统回收站并记录操作日志
     pub fn recycle_file(&self, result_id: i64, run_id: &str) -> Result<PathBuf> {
+        self.recycle_file_with(result_id, run_id, send_file_to_system_recycle_bin)
+    }
+
+    /// 通过可替换的系统回收实现执行删除，供边界测试验证日志行为。
+    fn recycle_file_with<F>(&self, result_id: i64, run_id: &str, recycle: F) -> Result<PathBuf>
+    where
+        F: FnOnce(&Path) -> Result<()>,
+    {
         // 1. 执行前复验
         self.verify_before_recycle(result_id, run_id)?;
 
@@ -129,47 +227,19 @@ impl<'a> RecycleEngine<'a> {
 
         let source_path = PathBuf::from(&comparison_image.file_path);
 
-        // 3. 获取文件夹信息，找到对比目录根路径
-        let folder = self
-            .repository
-            .get_folder(comparison_image.folder_id)?
-            .ok_or_else(|| AppError::NotFound("文件夹不存在".to_string()))?;
-
-        let comparison_root = PathBuf::from(&folder.path);
-
-        // 4. 计算相对路径
-        let relative_path = source_path
-            .strip_prefix(&comparison_root)
-            .map_err(|_| AppError::InvalidPath)?;
-
-        // 5. 构建回收站目标路径
-        let recycle_root = comparison_root.join(".recycle").join(run_id);
-        let mut target_path = recycle_root.join(relative_path);
-
-        // 6. 检查目标路径冲突，生成唯一名
-        if target_path.exists() {
-            target_path = self.generate_unique_path(&target_path)?;
-        }
-
-        // 7. 创建目标目录
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| AppError::FileSystem(format!("创建回收站目录失败: {}", e)))?;
-        }
-
-        // 8. 记录 prepared 状态
+        // 3. 系统回收站没有稳定的普通文件路径，因此只记录原路径。
         self.repository
             .update_result_action_status(result_id, ActionStatus::Prepared)?;
         self.repository.create_action_log(
             result_id,
             "prepared",
             Some(&source_path.to_string_lossy()),
-            Some(&target_path.to_string_lossy()),
+            None,
             None,
         )?;
 
-        // 9. 移动文件
-        fs::rename(&source_path, &target_path).map_err(|e| {
+        // 4. 通过系统 Shell 执行移入回收站，失败时保留原文件。
+        dispatch_system_recycle(&source_path, recycle).map_err(|error| {
             // 移动失败，记录错误
             let _ = self
                 .repository
@@ -179,31 +249,33 @@ impl<'a> RecycleEngine<'a> {
                 "failed",
                 None,
                 None,
-                Some(&format!("移动文件失败: {}", e)),
+                Some(&error.to_string()),
             );
-            AppError::FileSystem(format!("移动文件失败: {}", e))
+            error
         })?;
 
-        // 10. 验证目标文件
-        if !target_path.exists() {
+        // 5. Shell 返回成功后，源路径必须已经不存在。
+        if source_path.exists() {
             let _ = self
                 .repository
                 .update_result_action_status(result_id, ActionStatus::Failed);
-            return Err(AppError::FileSystem("移动后目标文件不存在".to_string()));
+            return Err(AppError::FileSystem(
+                "移入 Windows 回收站后源文件仍然存在".to_string(),
+            ));
         }
 
-        // 11. 记录 recycled 状态
+        // 6. 记录已移入系统回收站；target_path 留空表示由 Windows 管理位置。
         self.repository
             .update_result_action_status(result_id, ActionStatus::Recycled)?;
         self.repository.create_action_log(
             result_id,
             "recycled",
             Some(&source_path.to_string_lossy()),
-            Some(&target_path.to_string_lossy()),
+            None,
             None,
         )?;
 
-        Ok(target_path)
+        Ok(source_path)
     }
 
     /// Phase 7.3: 恢复文件
@@ -235,11 +307,12 @@ impl<'a> RecycleEngine<'a> {
                 .as_ref()
                 .ok_or_else(|| AppError::Internal("日志缺少源路径".to_string()))?,
         );
-        let recycled_path = PathBuf::from(
-            log.target_path
-                .as_ref()
-                .ok_or_else(|| AppError::Internal("日志缺少目标路径".to_string()))?,
-        );
+        let Some(recycled_path_value) = log.target_path.as_ref() else {
+            return Err(AppError::ValidationError(
+                "该文件已移入 Windows 系统回收站，请在 Windows 回收站中恢复".to_string(),
+            ));
+        };
+        let recycled_path = PathBuf::from(recycled_path_value);
 
         // 4. 检查回收文件存在
         if !recycled_path.exists() {
@@ -305,11 +378,12 @@ impl<'a> RecycleEngine<'a> {
             .get_last_action_log(result_id, "recycled")?
             .ok_or_else(|| AppError::NotFound("找不到回收操作日志".to_string()))?;
 
-        let recycled_path = PathBuf::from(
-            log.target_path
-                .as_ref()
-                .ok_or_else(|| AppError::Internal("日志缺少目标路径".to_string()))?,
-        );
+        let Some(recycled_path_value) = log.target_path.as_ref() else {
+            return Err(AppError::ValidationError(
+                "该文件已移入 Windows 系统回收站，请在 Windows 回收站中永久删除".to_string(),
+            ));
+        };
+        let recycled_path = PathBuf::from(recycled_path_value);
 
         // 4. 检查回收文件存在
         if !recycled_path.exists() {
@@ -335,28 +409,6 @@ impl<'a> RecycleEngine<'a> {
         )?;
 
         Ok(())
-    }
-
-    /// 生成唯一文件路径（避免覆盖）
-    fn generate_unique_path(&self, path: &Path) -> Result<PathBuf> {
-        let parent = path.parent().ok_or_else(|| AppError::InvalidPath)?;
-
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| AppError::InvalidPath)?;
-
-        let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-
-        let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-
-        let new_name = if extension.is_empty() {
-            format!("{}_{}", stem, timestamp)
-        } else {
-            format!("{}_{}.{}", stem, timestamp, extension)
-        };
-
-        Ok(parent.join(new_name))
     }
 
     /// 计算 BLAKE3 哈希
@@ -385,5 +437,39 @@ impl<'a> RecycleEngine<'a> {
         }
 
         Ok(hasher.finalize().to_hex().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    /// Windows 删除 flags 必须要求无法回收时失败。
+    fn windows_recycle_operation_requires_recycle_on_delete() {
+        use windows::Win32::UI::Shell::FOFX_RECYCLEONDELETE;
+
+        assert!(system_recycle_operation_flags().contains(FOFX_RECYCLEONDELETE));
+    }
+
+    #[test]
+    /// 系统回收调度不得在原目录创建程序私有副本。
+    fn system_recycle_dispatch_does_not_create_an_internal_recycle_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("confirmed.png");
+        fs::write(&source_path, b"test image").unwrap();
+        let mut dispatched_path = None;
+
+        let returned_path = dispatch_system_recycle(&source_path, |path| {
+            dispatched_path = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(returned_path, source_path);
+        assert_eq!(dispatched_path, Some(source_path.clone()));
+        assert!(source_path.exists());
+        assert!(!temp.path().join(".recycle").exists());
     }
 }

@@ -8,7 +8,7 @@
       </template>
 
       <el-form label-width="180px" label-position="left">
-        <el-form-item label="回收站文件数量">
+        <el-form-item label="已移入系统回收站">
           <el-tag type="info" size="large">{{ deleteStore.recycleBinCount }} 个文件</el-tag>
         </el-form-item>
 

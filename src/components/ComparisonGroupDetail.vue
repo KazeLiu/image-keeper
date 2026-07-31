@@ -856,7 +856,7 @@ async function confirmRecycleSelected() {
 
   try {
     await ElMessageBox.confirm(
-      `将 ${imageIds.length} 张图片移动到当前任务的回收站目录（.recycle），之后可按回收站记录恢复。是否继续？`,
+      `将 ${imageIds.length} 张图片移入 Windows 系统回收站，之后可在 Windows 回收站中恢复或永久删除。是否继续？`,
       '删除所选图片',
       {
         confirmButtonText: '移动到回收站',
@@ -884,11 +884,11 @@ async function confirmRecycleSelected() {
 
     if (failedOutcomes.length > 0) {
       const firstError = failedOutcomes[0]?.error_message || '部分图片移动失败'
-      ElMessage.warning(`已移动 ${successImageIds.length} 张，失败 ${failedOutcomes.length} 张：${firstError}`)
+      ElMessage.warning(`已移入系统回收站 ${successImageIds.length} 张，失败 ${failedOutcomes.length} 张：${firstError}`)
       return
     }
 
-    ElMessage.success(`已移动 ${successImageIds.length} 张图片到回收站`)
+    ElMessage.success(`已移入 Windows 系统回收站 ${successImageIds.length} 张图片`)
   } catch (error: any) {
     ElMessage.error(error?.message || '移动到回收站失败')
   } finally {
