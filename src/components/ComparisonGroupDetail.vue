@@ -488,6 +488,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   batchRecycleImages,
+  cancelGroupSimilarityRequest,
   getGroupSimilarityScores,
   startGroupSimilarityBackfill
 } from '@/api/comparison'
@@ -543,6 +544,9 @@ const isLoadingCrossCheck = ref(false)
 const hasManualAssignmentChanges = ref(false)
 let crossCheckRequestId = 0
 let activeCrossCheckRequestKey = ''
+let activeCrossCheckGroup: ComparisonGroup | null = null
+let activeCrossCheckRunId = ''
+let activeCrossCheckDistance = 0
 let lastLoadedGroupKey = ''
 let unlistenGroupSimilarityProgress: UnlistenFn | null = null
 let groupSimilarityProgressListenerPromise: Promise<void> | null = null
@@ -665,6 +669,7 @@ watch(
   ([nextGroupKey, isRefreshing]) => {
     if (isRefreshing) {
       crossCheckRequestId += 1
+      cancelActiveCrossCheckRequest()
       isLoadingCrossCheck.value = false
       return
     }
@@ -695,6 +700,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  crossCheckRequestId += 1
+  cancelActiveCrossCheckRequest()
   if (unlistenGroupSimilarityProgress) {
     unlistenGroupSimilarityProgress()
     unlistenGroupSimilarityProgress = null
@@ -901,9 +908,8 @@ function rememberOriginalRecognitionThreshold(value: number) {
 }
 
 async function loadGroupCrossCheckScores() {
+  cancelActiveCrossCheckRequest()
   const requestId = ++crossCheckRequestId
-  const requestKey = `group-${requestId}-${Date.now()}`
-  activeCrossCheckRequestKey = requestKey
   const currentGroup = group.value
   groupSimilarityScores.value = []
   crossCheckProgress.value = null
@@ -923,15 +929,23 @@ async function loadGroupCrossCheckScores() {
     return
   }
 
+  const requestKey = `group-${requestId}-${Date.now()}`
+  const runId = store.currentRunId
+  const groupingDistance = store.appliedGroupingDistance
+  activeCrossCheckRequestKey = requestKey
+  activeCrossCheckGroup = currentGroup
+  activeCrossCheckRunId = runId
+  activeCrossCheckDistance = groupingDistance
   isLoadingCrossCheck.value = true
   store.markGroupSimilarityStatus(currentGroup, 'running', '正在优先比对当前分组 SSIM')
   try {
     await ensureGroupSimilarityProgressListener()
+    if (requestId !== crossCheckRequestId) return
     const scores = await getGroupSimilarityScores(
-      store.currentRunId,
+      runId,
       currentGroup.members.map((member) => member.image_id),
       requestKey,
-      store.appliedGroupingDistance,
+      groupingDistance,
       currentGroup.group_index
     )
     if (requestId === crossCheckRequestId) {
@@ -960,9 +974,40 @@ async function loadGroupCrossCheckScores() {
     }
   } finally {
     if (requestId === crossCheckRequestId) {
+      activeCrossCheckRequestKey = ''
+      activeCrossCheckGroup = null
+      activeCrossCheckRunId = ''
+      activeCrossCheckDistance = 0
       isLoadingCrossCheck.value = false
     }
   }
+}
+
+function cancelActiveCrossCheckRequest() {
+  const requestKey = activeCrossCheckRequestKey
+  if (!requestKey) return
+
+  const requestGroup = activeCrossCheckGroup
+  const requestRunId = activeCrossCheckRunId
+  const requestDistance = activeCrossCheckDistance
+  activeCrossCheckRequestKey = ''
+  activeCrossCheckGroup = null
+  activeCrossCheckRunId = ''
+  activeCrossCheckDistance = 0
+  if (
+    requestGroup &&
+    requestRunId === store.currentRunId &&
+    requestDistance === store.appliedGroupingDistance
+  ) {
+    store.markGroupSimilarityStatus(
+      requestGroup,
+      'pending',
+      '已切换分组，等待后台 SSIM 计算'
+    )
+  }
+  void cancelGroupSimilarityRequest(requestKey).catch((error) => {
+    console.warn('取消旧的组内相似度计算失败:', error)
+  })
 }
 
 function scheduleGroupSimilarityBackfill(currentGroup: ComparisonGroup) {

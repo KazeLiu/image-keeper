@@ -20,6 +20,18 @@ impl SsimComputer {
         StandardSsim::compute_gray(left, right)
     }
 
+    /// 对已归一化灰度图执行可取消的标准 SSIM。
+    pub fn compute_gray_cancellable<F>(
+        left: &GrayImage,
+        right: &GrayImage,
+        is_cancelled: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> bool,
+    {
+        StandardSsim::compute_gray_cancellable(left, right, is_cancelled)
+    }
+
     /// 计算两个文件的标准 SSIM。参数顺序不影响归一化结果。
     ///
     /// 两张图片统一到像素数较少图片的完整宽高，不再使用 512px 降采样。

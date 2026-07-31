@@ -10,7 +10,7 @@ use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
     Arc, Mutex, OnceLock,
 };
 use tauri::{Emitter, State, Window};
@@ -740,11 +740,21 @@ fn ensure_current_algorithm_profile(algorithm_profile_id: &str) -> Result<()> {
     )))
 }
 
+#[cfg(test)]
 fn refresh_current_file_fingerprints(images: &mut [ImageSummary]) -> Result<()> {
+    refresh_current_file_fingerprints_for_request(images, None)
+}
+
+fn refresh_current_file_fingerprints_for_request(
+    images: &mut [ImageSummary],
+    request: Option<&GroupSimilarityForegroundRequest>,
+) -> Result<()> {
     for image in images {
+        ensure_group_similarity_request_active(request)?;
         let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
             AppError::FileSystem(format!("无法读取图片 {}: {error}", image.relative_path))
         })?;
+        ensure_group_similarity_request_active(request)?;
         let metadata = std::fs::metadata(&canonical)?;
         if !metadata.is_file() {
             return Err(AppError::ValidationError(format!(
@@ -792,9 +802,33 @@ struct GroupSimilarityBackfillKey {
     grouping_distance: i32,
 }
 
+#[derive(Debug, Clone)]
+struct GroupSimilarityForegroundRequest {
+    request_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl GroupSimilarityForegroundRequest {
+    fn new(request_id: &str) -> Self {
+        Self {
+            request_id: request_id.to_string(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, AtomicOrdering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(AtomicOrdering::Acquire)
+    }
+}
+
 #[derive(Default)]
 pub struct GroupSimilarityBackfillState {
     active_jobs: Mutex<HashMap<GroupSimilarityBackfillKey, Option<usize>>>,
+    active_foreground_request: Mutex<Option<GroupSimilarityForegroundRequest>>,
 }
 
 impl GroupSimilarityBackfillState {
@@ -820,13 +854,67 @@ impl GroupSimilarityBackfillState {
     fn finish(&self, key: &GroupSimilarityBackfillKey) {
         self.active_jobs.lock().unwrap().remove(key);
     }
+
+    fn start_foreground_request(&self, request_id: &str) -> GroupSimilarityForegroundRequest {
+        let request = GroupSimilarityForegroundRequest::new(request_id);
+        if let Some(previous) = self
+            .active_foreground_request
+            .lock()
+            .unwrap()
+            .replace(request.clone())
+        {
+            previous.cancel();
+        }
+        request
+    }
+
+    fn finish_foreground_request(&self, request: &GroupSimilarityForegroundRequest) {
+        let mut active_request = self.active_foreground_request.lock().unwrap();
+        if active_request
+            .as_ref()
+            .is_some_and(|active| active.request_id == request.request_id)
+        {
+            active_request.take();
+        }
+    }
+
+    fn cancel_foreground_request(&self, request_id: &str) -> bool {
+        let active_request = self.active_foreground_request.lock().unwrap();
+        let Some(active_request) = active_request
+            .as_ref()
+            .filter(|request| request.request_id == request_id)
+        else {
+            return false;
+        };
+        active_request.cancel();
+        true
+    }
 }
 
+fn ensure_group_similarity_request_active(
+    request: Option<&GroupSimilarityForegroundRequest>,
+) -> Result<()> {
+    if request.is_some_and(GroupSimilarityForegroundRequest::is_cancelled) {
+        return Err(AppError::Internal("组内 SSIM 请求已取消".to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn validate_current_file_fingerprints(images: &[ImageSummary]) -> Result<()> {
+    validate_current_file_fingerprints_for_request(images, None)
+}
+
+fn validate_current_file_fingerprints_for_request(
+    images: &[ImageSummary],
+    request: Option<&GroupSimilarityForegroundRequest>,
+) -> Result<()> {
     for image in images {
+        ensure_group_similarity_request_active(request)?;
         let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
             AppError::FileSystem(format!("无法读取图片 {}: {error}", image.relative_path))
         })?;
+        ensure_group_similarity_request_active(request)?;
         let metadata = std::fs::metadata(&canonical)?;
         let modified_ns = metadata
             .modified()
@@ -1283,6 +1371,22 @@ fn persist_group_similarity_scores(
     Ok(())
 }
 
+fn read_persisted_group_similarity_signatures(
+    repo: &Repository,
+    run_id: &str,
+) -> Result<HashSet<String>> {
+    let mut stmt = repo.conn().prepare(
+        r#"SELECT member_signature
+           FROM comparison_group_similarity_cache
+           WHERE run_id = ?1 AND algorithm_profile_id = ?2"#,
+    )?;
+    let rows = stmt.query_map(params![run_id, CURRENT_ALGORITHM_PROFILE_ID], |row| {
+        row.get::<_, String>(0)
+    })?;
+    rows.collect::<std::result::Result<HashSet<_>, _>>()
+        .map_err(Into::into)
+}
+
 fn similarity_image_cache_key(
     run_id: &str,
     image: &ImageSummary,
@@ -1539,9 +1643,11 @@ fn prepare_similarity_image(
     image: &ImageSummary,
     target_width: u32,
     target_height: u32,
+    request: Option<&GroupSimilarityForegroundRequest>,
 ) -> Result<Arc<CachedSimilarityImage>> {
     use crate::core::ssim::compute::SsimComputer;
 
+    ensure_group_similarity_request_active(request)?;
     let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
     if let Some(cached_image) = group_similarity_image_cache()
         .lock()
@@ -1553,7 +1659,9 @@ fn prepare_similarity_image(
     }
 
     let source_image = image::open(Path::new(&image.file_path))?;
+    ensure_group_similarity_request_active(request)?;
     let gray_image = SsimComputer::prepare_image(&source_image, target_width, target_height)?;
+    ensure_group_similarity_request_active(request)?;
     let cached_image = Arc::new(CachedSimilarityImage { gray: gray_image });
 
     let mut cache = group_similarity_image_cache().lock().unwrap();
@@ -1570,6 +1678,7 @@ fn prepare_similarity_image(
 fn compute_similarity_from_cached_images(
     left: &CachedSimilarityImage,
     right: &CachedSimilarityImage,
+    request: Option<&GroupSimilarityForegroundRequest>,
 ) -> Result<f64> {
     if left.gray.dimensions() != right.gray.dimensions() {
         return Err(AppError::SsimComputation("图片尺寸不匹配".to_string()));
@@ -1577,13 +1686,16 @@ fn compute_similarity_from_cached_images(
 
     use crate::core::ssim::compute::SsimComputer;
 
-    SsimComputer::compute_gray(&left.gray, &right.gray)
+    SsimComputer::compute_gray_cancellable(&left.gray, &right.gray, || {
+        request.is_some_and(GroupSimilarityForegroundRequest::is_cancelled)
+    })
 }
 
 fn compute_group_similarity_pair(
     run_id: &str,
     left: &ImageSummary,
     right: &ImageSummary,
+    request: Option<&GroupSimilarityForegroundRequest>,
 ) -> GroupSimilarityScore {
     use crate::core::ssim::compute::SsimComputer;
 
@@ -1593,11 +1705,11 @@ fn compute_group_similarity_pair(
     );
 
     match (
-        prepare_similarity_image(run_id, left, target_width, target_height),
-        prepare_similarity_image(run_id, right, target_width, target_height),
+        prepare_similarity_image(run_id, left, target_width, target_height, request),
+        prepare_similarity_image(run_id, right, target_width, target_height, request),
     ) {
         (Ok(large_image), Ok(small_image)) => {
-            match compute_similarity_from_cached_images(&large_image, &small_image) {
+            match compute_similarity_from_cached_images(&large_image, &small_image, request) {
                 Ok(ssim_score) => GroupSimilarityScore {
                     left_image_id: left.id,
                     right_image_id: right.id,
@@ -1628,9 +1740,11 @@ fn compute_group_similarity_scores_with_cache_policy(
     window: Option<&Window>,
     pool: &ThreadPool,
     retain_computed_results_in_memory: bool,
+    request: Option<&GroupSimilarityForegroundRequest>,
 ) -> Result<Vec<GroupSimilarityScore>> {
+    ensure_group_similarity_request_active(request)?;
     let mut current_images = images.to_vec();
-    refresh_current_file_fingerprints(&mut current_images)?;
+    refresh_current_file_fingerprints_for_request(&mut current_images, request)?;
     let images = current_images.as_slice();
     let full_pair_count = images.len().saturating_mul(images.len().saturating_sub(1)) / 2;
     let plan = build_group_similarity_plan(images);
@@ -1719,10 +1833,19 @@ fn compute_group_similarity_scores_with_cache_policy(
     let image_cache_hits = AtomicUsize::new(0);
     pool.install(|| {
         image_cache_jobs.par_iter().for_each(|job| {
+            if request.is_some_and(GroupSimilarityForegroundRequest::is_cancelled) {
+                return;
+            }
             let image = &images[job.image_index];
             let was_cached =
                 has_cached_similarity_image(run_id, image, job.target_width, job.target_height);
-            let _ = prepare_similarity_image(run_id, image, job.target_width, job.target_height);
+            let _ = prepare_similarity_image(
+                run_id,
+                image,
+                job.target_width,
+                job.target_height,
+                request,
+            );
             let processed = processed_cache_images.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             let hits = if was_cached {
                 image_cache_hits.fetch_add(1, AtomicOrdering::SeqCst) + 1
@@ -1752,6 +1875,7 @@ fn compute_group_similarity_scores_with_cache_policy(
             }
         });
     });
+    ensure_group_similarity_request_active(request)?;
     let processed_cache_images = processed_cache_images.load(AtomicOrdering::SeqCst);
     let image_cache_hits = image_cache_hits.load(AtomicOrdering::SeqCst);
 
@@ -1763,6 +1887,9 @@ fn compute_group_similarity_scores_with_cache_policy(
     let scores = pool.install(|| {
         plan.par_iter()
             .map(|pair| {
+                if request.is_some_and(GroupSimilarityForegroundRequest::is_cancelled) {
+                    return None;
+                }
                 let left = &images[pair.left_index];
                 let right = &images[pair.right_index];
                 let cache_key = group_similarity_cache_key(run_id, left, right);
@@ -1796,7 +1923,7 @@ fn compute_group_similarity_scores_with_cache_policy(
                             ),
                         );
                     }
-                    return cached_score;
+                    return Some(cached_score);
                 }
 
                 if let Some(window) = &progress_window {
@@ -1821,7 +1948,7 @@ fn compute_group_similarity_scores_with_cache_policy(
                     );
                 }
 
-                let score = compute_group_similarity_pair(run_id, left, right);
+                let score = compute_group_similarity_pair(run_id, left, right, request);
 
                 let processed = processed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
                 let computed = computed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
@@ -1848,12 +1975,15 @@ fn compute_group_similarity_scores_with_cache_policy(
                     );
                 }
 
-                score
+                Some(score)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<Option<GroupSimilarityScore>>>()
     });
+    ensure_group_similarity_request_active(request)?;
+    let scores = scores.into_iter().flatten().collect::<Vec<_>>();
 
-    validate_current_file_fingerprints(images)?;
+    validate_current_file_fingerprints_for_request(images, request)?;
+    ensure_group_similarity_request_active(request)?;
     if retain_computed_results_in_memory {
         let mut pair_cache = group_similarity_cache().lock().unwrap();
         for (pair, score) in plan.iter().zip(&scores) {
@@ -1907,9 +2037,11 @@ fn compute_persisted_group_similarity_scores(
     window: Option<&Window>,
     pool: &ThreadPool,
     retain_computed_results_in_memory: bool,
+    request: Option<&GroupSimilarityForegroundRequest>,
 ) -> Result<Vec<GroupSimilarityScore>> {
+    ensure_group_similarity_request_active(request)?;
     let mut current_images = images.to_vec();
-    refresh_current_file_fingerprints(&mut current_images)?;
+    refresh_current_file_fingerprints_for_request(&mut current_images, request)?;
     let result_cache_key = group_similarity_result_cache_key(run_id, &current_images);
     let persisted_scores = {
         let repo_lock = repo.lock().unwrap();
@@ -1929,6 +2061,7 @@ fn compute_persisted_group_similarity_scores(
         window,
         pool,
         retain_computed_results_in_memory,
+        request,
     ) {
         Ok(scores) => scores,
         Err(error) => {
@@ -1936,10 +2069,11 @@ fn compute_persisted_group_similarity_scores(
             return Err(error);
         }
     };
-    if let Err(error) = validate_current_file_fingerprints(&current_images) {
+    if let Err(error) = validate_current_file_fingerprints_for_request(&current_images, request) {
         clear_group_similarity_memory_cache_if_run_missing(repo, run_id)?;
         return Err(error);
     }
+    ensure_group_similarity_request_active(request)?;
     {
         let repo_lock = repo.lock().unwrap();
         if repo_lock.get_run(run_id)?.is_none() {
@@ -1951,18 +2085,51 @@ fn compute_persisted_group_similarity_scores(
     Ok(scores)
 }
 
-fn read_group_similarity_statuses(
+struct GroupSimilarityStatusSnapshot {
+    run_id: String,
+    grouping_distance: i32,
+    groups: Vec<ComparisonGroup>,
+    images_by_id: HashMap<i64, ImageSummary>,
+    running_group_index: Option<usize>,
+    cached_member_signatures: HashSet<String>,
+}
+
+fn read_group_similarity_status_snapshot(
     repo: &Repository,
     state: &GroupSimilarityBackfillState,
     run_id: &str,
     grouping_distance: i32,
-) -> Result<Vec<GroupSimilarityStatus>> {
+) -> Result<GroupSimilarityStatusSnapshot> {
     let groups = read_comparison_groups(repo, run_id, Some(grouping_distance))?;
+    let images_by_id = read_completed_images(repo, run_id)?
+        .into_iter()
+        .map(|image| (image.id, image))
+        .collect();
     let backfill_key = GroupSimilarityBackfillKey {
         run_id: run_id.to_string(),
         grouping_distance,
     };
-    let running_group_index = state.current_group(&backfill_key);
+    Ok(GroupSimilarityStatusSnapshot {
+        run_id: run_id.to_string(),
+        grouping_distance,
+        groups,
+        images_by_id,
+        running_group_index: state.current_group(&backfill_key),
+        cached_member_signatures: read_persisted_group_similarity_signatures(repo, run_id)?,
+    })
+}
+
+fn resolve_group_similarity_statuses(
+    snapshot: GroupSimilarityStatusSnapshot,
+) -> Result<Vec<GroupSimilarityStatus>> {
+    let GroupSimilarityStatusSnapshot {
+        run_id,
+        grouping_distance,
+        groups,
+        images_by_id,
+        running_group_index,
+        cached_member_signatures,
+    } = snapshot;
 
     groups
         .into_iter()
@@ -1974,7 +2141,7 @@ fn read_group_similarity_statuses(
                 .collect::<Vec<_>>();
             if image_ids.len() < 2 {
                 return Ok(group_similarity_status(
-                    run_id,
+                    &run_id,
                     grouping_distance,
                     group.group_index,
                     &image_ids,
@@ -1984,18 +2151,24 @@ fn read_group_similarity_statuses(
             }
 
             let persisted = (|| -> Result<bool> {
-                let mut images = read_images_by_ids(repo, run_id, &image_ids)?;
-                if images.len() != image_ids.len() {
-                    return Ok(false);
-                }
-                refresh_current_file_fingerprints(&mut images)?;
-                let cache_key = group_similarity_result_cache_key(run_id, &images);
-                Ok(read_persisted_group_similarity_scores(repo, &cache_key)?.is_some())
+                let mut images = group
+                    .members
+                    .iter()
+                    .map(|member| {
+                        images_by_id.get(&member.image_id).cloned().ok_or_else(|| {
+                            AppError::Internal(format!("分组图片记录不存在: {}", member.image_id))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                refresh_current_file_fingerprints_for_request(&mut images, None)?;
+                let cache_key = group_similarity_result_cache_key(&run_id, &images);
+                let member_signature = group_similarity_member_signature(&cache_key)?;
+                Ok(cached_member_signatures.contains(&member_signature))
             })();
 
             match persisted {
                 Ok(true) => Ok(group_similarity_status(
-                    run_id,
+                    &run_id,
                     grouping_distance,
                     group.group_index,
                     &image_ids,
@@ -2004,7 +2177,7 @@ fn read_group_similarity_statuses(
                 )),
                 Ok(false) if running_group_index == Some(group.group_index) => {
                     Ok(group_similarity_status(
-                        run_id,
+                        &run_id,
                         grouping_distance,
                         group.group_index,
                         &image_ids,
@@ -2013,7 +2186,7 @@ fn read_group_similarity_statuses(
                     ))
                 }
                 Ok(false) => Ok(group_similarity_status(
-                    run_id,
+                    &run_id,
                     grouping_distance,
                     group.group_index,
                     &image_ids,
@@ -2021,7 +2194,7 @@ fn read_group_similarity_statuses(
                     "尚未比对，正在等待后台 SSIM 计算",
                 )),
                 Err(error) => Ok(group_similarity_status(
-                    run_id,
+                    &run_id,
                     grouping_distance,
                     group.group_index,
                     &image_ids,
@@ -2031,6 +2204,21 @@ fn read_group_similarity_statuses(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+fn read_group_similarity_statuses(
+    repo: &Repository,
+    state: &GroupSimilarityBackfillState,
+    run_id: &str,
+    grouping_distance: i32,
+) -> Result<Vec<GroupSimilarityStatus>> {
+    resolve_group_similarity_statuses(read_group_similarity_status_snapshot(
+        repo,
+        state,
+        run_id,
+        grouping_distance,
+    )?)
 }
 
 fn ordered_backfill_group_indices(
@@ -2110,6 +2298,7 @@ fn backfill_group_similarity_scores(
                     None,
                     background_algorithm_pool(),
                     false,
+                    None,
                 ) {
                     Ok(scores) if group_similarity_scores_are_complete(&scores) => {
                         group_similarity_status(
@@ -2372,19 +2561,29 @@ pub async fn get_group_similarity_scores(
     group_index: usize,
     window: Window,
     repo: State<'_, Arc<Mutex<Repository>>>,
+    state: State<'_, Arc<GroupSimilarityBackfillState>>,
 ) -> Result<Vec<GroupSimilarityScore>> {
     if !(0..=24).contains(&grouping_distance) || group_index == 0 {
         return Err(AppError::ValidationError(
             "分组宽松度或分组序号无效".to_string(),
         ));
     }
-    let images = {
+    let state = Arc::clone(state.inner());
+    let request = state.start_foreground_request(&request_id);
+    let images_result = (|| -> Result<Vec<ImageSummary>> {
         let repo_lock = repo.lock().unwrap();
         let run = repo_lock
             .get_run(&run_id)?
             .ok_or_else(|| AppError::NotFound(format!("运行不存在: {}", run_id)))?;
         ensure_current_algorithm_profile(&run.algorithm_profile_id)?;
-        read_images_by_ids(&repo_lock, &run_id, &image_ids)?
+        read_images_by_ids(&repo_lock, &run_id, &image_ids)
+    })();
+    let images = match images_result {
+        Ok(images) => images,
+        Err(error) => {
+            state.finish_foreground_request(&request);
+            return Err(error);
+        }
     };
     let repo = Arc::clone(repo.inner());
     emit_group_similarity_status(
@@ -2400,6 +2599,7 @@ pub async fn get_group_similarity_scores(
     );
     let progress_window = window.clone();
     let compute_run_id = run_id.clone();
+    let compute_request = request.clone();
     let compute_result = tauri::async_runtime::spawn_blocking(move || {
         compute_persisted_group_similarity_scores(
             &repo,
@@ -2409,9 +2609,25 @@ pub async fn get_group_similarity_scores(
             Some(&progress_window),
             algorithm_pool(),
             true,
+            Some(&compute_request),
         )
     })
     .await;
+    state.finish_foreground_request(&request);
+    if let Err(error) = ensure_group_similarity_request_active(Some(&request)) {
+        emit_group_similarity_status(
+            &window,
+            &group_similarity_status(
+                &run_id,
+                grouping_distance,
+                group_index,
+                &image_ids,
+                "pending",
+                "当前分组 SSIM 比对已取消，正在等待后台计算",
+            ),
+        );
+        return Err(error);
+    }
 
     match compute_result {
         Ok(Ok(scores)) if group_similarity_scores_are_complete(&scores) => {
@@ -2474,6 +2690,16 @@ pub async fn get_group_similarity_scores(
     }
 }
 
+/// 取消仍在排队或计算中的前台组内 SSIM 请求。
+#[tauri::command]
+pub async fn cancel_group_similarity_request(
+    request_id: String,
+    state: State<'_, Arc<GroupSimilarityBackfillState>>,
+) -> Result<()> {
+    state.cancel_foreground_request(&request_id);
+    Ok(())
+}
+
 /// 获取正式任务中全部自动分组的 SSIM 缓存与后台队列状态。
 #[tauri::command]
 pub async fn get_group_similarity_statuses(
@@ -2491,8 +2717,11 @@ pub async fn get_group_similarity_statuses(
     let repo = Arc::clone(repo.inner());
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let repo_lock = repo.lock().unwrap();
-        read_group_similarity_statuses(&repo_lock, &state, &run_id, grouping_distance)
+        let snapshot = {
+            let repo_lock = repo.lock().unwrap();
+            read_group_similarity_status_snapshot(&repo_lock, &state, &run_id, grouping_distance)?
+        };
+        resolve_group_similarity_statuses(snapshot)
     })
     .await
     .map_err(|error| AppError::Internal(format!("读取组内 SSIM 状态失败: {error}")))?
@@ -3444,6 +3673,156 @@ mod tests {
     }
 
     #[test]
+    fn similarity_status_does_not_treat_missing_source_files_as_completed() {
+        let (repo, _) = create_group_cache_test_repo();
+        repo.conn()
+            .execute(
+                "UPDATE images SET width = 5, height = 5, file_size = 20 WHERE run_id = 'run-1' AND relative_path = 'b.png'",
+                [],
+            )
+            .unwrap();
+        let group = read_comparison_groups(&repo, "run-1", Some(10))
+            .unwrap()
+            .into_iter()
+            .find(|group| group.member_count == 2)
+            .unwrap();
+        let images = group
+            .members
+            .iter()
+            .map(|member| {
+                image_summary_for_plan(
+                    member.image_id,
+                    &member.relative_path,
+                    member.width,
+                    member.height,
+                    member.file_size,
+                    member.phash.as_deref().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let plan = build_group_similarity_plan(&images);
+        assert_eq!(plan.len(), 1);
+        let scores = plan
+            .iter()
+            .map(|pair| GroupSimilarityScore {
+                left_image_id: images[pair.left_index].id,
+                right_image_id: images[pair.right_index].id,
+                ssim_score: Some(0.99),
+                error_message: None,
+            })
+            .collect::<Vec<_>>();
+        let cache_key = group_similarity_result_cache_key("run-1", &images);
+        persist_group_similarity_scores(&repo, &cache_key, &scores).unwrap();
+
+        let statuses = read_group_similarity_statuses(
+            &repo,
+            &GroupSimilarityBackfillState::default(),
+            "run-1",
+            10,
+        )
+        .unwrap();
+        let status = statuses
+            .iter()
+            .find(|status| status.image_ids.len() == 2)
+            .unwrap();
+
+        assert_eq!(status.status, "pending");
+    }
+
+    #[test]
+    fn similarity_status_rejects_cache_after_a_source_file_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_path = temp.path().join("original.png");
+        let thumbnail_path = temp.path().join("thumbnail.png");
+        GrayImage::from_pixel(8, 8, Luma([120]))
+            .save(&original_path)
+            .unwrap();
+        GrayImage::from_pixel(4, 4, Luma([120]))
+            .save(&thumbnail_path)
+            .unwrap();
+        let (repo, _) = create_group_cache_test_repo();
+        for (relative_path, path, width, height) in [
+            ("a.png", original_path.as_path(), 8_u32, 8_u32),
+            ("b.png", thumbnail_path.as_path(), 4_u32, 4_u32),
+        ] {
+            let metadata = std::fs::metadata(path).unwrap();
+            let modified_at = metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            repo.conn()
+                .execute(
+                    "UPDATE images SET file_path = ?1, file_size = ?2, file_modified_at = ?3, width = ?4, height = ?5 WHERE run_id = 'run-1' AND relative_path = ?6",
+                    params![path.to_string_lossy(), metadata.len() as i64, modified_at, width, height, relative_path],
+                )
+                .unwrap();
+        }
+        let group = read_comparison_groups(&repo, "run-1", Some(10))
+            .unwrap()
+            .into_iter()
+            .find(|group| group.member_count == 2)
+            .unwrap();
+        let image_ids = group
+            .members
+            .iter()
+            .map(|member| member.image_id)
+            .collect::<Vec<_>>();
+        let mut images = read_images_by_ids(&repo, "run-1", &image_ids).unwrap();
+        refresh_current_file_fingerprints(&mut images).unwrap();
+        let plan = build_group_similarity_plan(&images);
+        let scores = plan
+            .iter()
+            .map(|pair| GroupSimilarityScore {
+                left_image_id: images[pair.left_index].id,
+                right_image_id: images[pair.right_index].id,
+                ssim_score: Some(1.0),
+                error_message: None,
+            })
+            .collect::<Vec<_>>();
+        persist_group_similarity_scores(
+            &repo,
+            &group_similarity_result_cache_key("run-1", &images),
+            &scores,
+        )
+        .unwrap();
+
+        let initial_statuses = read_group_similarity_statuses(
+            &repo,
+            &GroupSimilarityBackfillState::default(),
+            "run-1",
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            initial_statuses
+                .iter()
+                .find(|status| status.image_ids.len() == 2)
+                .unwrap()
+                .status,
+            "completed"
+        );
+
+        GrayImage::from_pixel(32, 32, Luma([10]))
+            .save(&thumbnail_path)
+            .unwrap();
+        let statuses = read_group_similarity_statuses(
+            &repo,
+            &GroupSimilarityBackfillState::default(),
+            "run-1",
+            10,
+        )
+        .unwrap();
+        let status = statuses
+            .iter()
+            .find(|status| status.image_ids.len() == 2)
+            .unwrap();
+
+        assert_eq!(status.status, "pending");
+    }
+
+    #[test]
     fn persisted_group_similarity_ignores_member_order() {
         let repo = create_test_repo();
         let images = vec![
@@ -3577,6 +3956,7 @@ mod tests {
             None,
             algorithm_pool(),
             true,
+            None,
         )
         .unwrap();
         let cache_count: i64 = repo
@@ -3638,6 +4018,7 @@ mod tests {
             None,
             algorithm_pool(),
             true,
+            None,
         )
         .unwrap_err();
 
@@ -3706,6 +4087,56 @@ mod tests {
         assert!(!state.try_start(key.clone()));
         state.finish(&key);
         assert!(state.try_start(key));
+    }
+
+    #[test]
+    fn newer_foreground_similarity_request_cancels_the_previous_request() {
+        let state = GroupSimilarityBackfillState::default();
+        let first = state.start_foreground_request("request-1");
+        let second = state.start_foreground_request("request-2");
+
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+
+        state.finish_foreground_request(&first);
+        let third = state.start_foreground_request("request-3");
+        assert!(second.is_cancelled());
+        assert!(!third.is_cancelled());
+    }
+
+    #[test]
+    fn foreground_similarity_request_can_be_cancelled_explicitly() {
+        let state = GroupSimilarityBackfillState::default();
+        let request = state.start_foreground_request("request-1");
+
+        assert!(state.cancel_foreground_request("request-1"));
+        assert!(request.is_cancelled());
+    }
+
+    #[test]
+    fn cancelled_similarity_request_stops_before_reading_images() {
+        let state = GroupSimilarityBackfillState::default();
+        let request = state.start_foreground_request("request-1");
+        state.cancel_foreground_request("request-1");
+        let repo = Arc::new(Mutex::new(create_test_repo()));
+        let images = vec![
+            image_summary_for_plan(1, "missing-a.png", 100, 100, 100, "0000000000000000"),
+            image_summary_for_plan(2, "missing-b.png", 50, 50, 50, "0000000000000001"),
+        ];
+
+        let error = compute_persisted_group_similarity_scores(
+            &repo,
+            "run-1",
+            &images,
+            "request-1",
+            None,
+            algorithm_pool(),
+            true,
+            Some(&request),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("已取消"));
     }
 
     #[test]
@@ -3858,7 +4289,7 @@ mod tests {
         let green_image = DynamicImage::ImageLuma8(green.gray.clone());
         let expected = StandardSsim::compute_owned(red_image, green_image).unwrap();
 
-        let score = compute_similarity_from_cached_images(&red, &green).unwrap();
+        let score = compute_similarity_from_cached_images(&red, &green, None).unwrap();
 
         assert!(
             (score - expected).abs() < 1e-12,
@@ -3880,7 +4311,7 @@ mod tests {
         )
         .unwrap();
 
-        let score = compute_similarity_from_cached_images(&left, &right).unwrap();
+        let score = compute_similarity_from_cached_images(&left, &right, None).unwrap();
 
         assert!((score - expected).abs() < 1e-12, "{score} != {expected}");
     }

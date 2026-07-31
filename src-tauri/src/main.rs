@@ -65,6 +65,7 @@ fn main() {
             commands::comparison::get_comparison_results,
             commands::comparison::get_comparison_groups,
             commands::comparison::get_group_similarity_scores,
+            commands::comparison::cancel_group_similarity_request,
             commands::comparison::get_group_similarity_statuses,
             commands::comparison::start_group_similarity_backfill,
             commands::comparison::get_run_status,

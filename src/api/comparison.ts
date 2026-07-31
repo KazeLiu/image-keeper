@@ -52,6 +52,11 @@ export async function getGroupSimilarityScores(
   })
 }
 
+/** 取消仍在排队或计算中的前台组内 SSIM 请求 */
+export async function cancelGroupSimilarityRequest(requestId: string): Promise<void> {
+  await invoke('cancel_group_similarity_request', { requestId })
+}
+
 /** 获取正式任务中全部自动分组的 SSIM 缓存与后台状态 */
 export async function getGroupSimilarityStatuses(
   runId: string,

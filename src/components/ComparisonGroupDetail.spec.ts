@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ComparisonGroupDetail from './ComparisonGroupDetail.vue'
 
 const apiMocks = vi.hoisted(() => ({
+  cancelGroupSimilarityRequest: vi.fn(async () => undefined),
   getGroupSimilarityScores: vi.fn(async () => ([{
     left_image_id: 1,
     right_image_id: 2,
@@ -13,6 +14,10 @@ const apiMocks = vi.hoisted(() => ({
   }])),
   batchRecycleImages: vi.fn(),
   startGroupSimilarityBackfill: vi.fn(async () => undefined)
+}))
+
+const eventMocks = vi.hoisted(() => ({
+  listen: vi.fn(async () => () => undefined)
 }))
 
 const clipboardWrite = vi.fn(async () => undefined)
@@ -31,6 +36,7 @@ const store = reactive({
 })
 
 vi.mock('@/api/comparison', () => ({
+  cancelGroupSimilarityRequest: apiMocks.cancelGroupSimilarityRequest,
   getGroupSimilarityScores: apiMocks.getGroupSimilarityScores,
   batchRecycleImages: apiMocks.batchRecycleImages,
   startGroupSimilarityBackfill: apiMocks.startGroupSimilarityBackfill
@@ -46,7 +52,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async () => () => undefined)
+  listen: eventMocks.listen
 }))
 
 function member(id: number, overrides: Record<string, unknown> = {}) {
@@ -73,6 +79,8 @@ function member(id: number, overrides: Record<string, unknown> = {}) {
 describe('ComparisonGroupDetail threshold semantics', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    eventMocks.listen.mockReset()
+    eventMocks.listen.mockResolvedValue(() => undefined)
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: clipboardWrite }
@@ -434,6 +442,8 @@ describe('ComparisonGroupDetail threshold semantics', () => {
     })
     await flushPromises()
     expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledTimes(1)
+    const firstRequestId = apiMocks.getGroupSimilarityScores.mock.calls[0][2]
+    const previousGroup = store.selectedGroup
 
     const nextGroup = {
       group_index: 2,
@@ -446,6 +456,12 @@ describe('ComparisonGroupDetail threshold semantics', () => {
     store.selectedGroup = nextGroup
     await flushPromises()
 
+    expect(apiMocks.cancelGroupSimilarityRequest).toHaveBeenCalledWith(firstRequestId)
+    expect(store.markGroupSimilarityStatus).toHaveBeenCalledWith(
+      previousGroup,
+      'pending',
+      '已切换分组，等待后台 SSIM 计算'
+    )
     expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledTimes(2)
     expect(apiMocks.getGroupSimilarityScores).toHaveBeenLastCalledWith(
       'run-1',
@@ -462,6 +478,50 @@ describe('ComparisonGroupDetail threshold semantics', () => {
 
     resolveFirstRequest?.([])
     await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('does not start a stale request when the selected group changes while the progress listener initializes', async () => {
+    let resolveListener: ((unlisten: () => void) => void) | null = null
+    eventMocks.listen.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveListener = resolve
+    }))
+    const previousGroup = store.selectedGroup
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    const nextGroup = {
+      group_index: 2,
+      representative_image_id: 3,
+      representative_file_name: '3.png',
+      member_count: 2,
+      has_low_quality_suggestion: true,
+      members: [member(3), member(4)]
+    }
+    store.selectedGroup = nextGroup
+    await flushPromises()
+
+    expect(store.markGroupSimilarityStatus).toHaveBeenCalledWith(
+      previousGroup,
+      'pending',
+      '已切换分组，等待后台 SSIM 计算'
+    )
+    expect(apiMocks.getGroupSimilarityScores).not.toHaveBeenCalled()
+
+    resolveListener?.(() => undefined)
+    await flushPromises()
+
+    expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledTimes(1)
+    expect(apiMocks.getGroupSimilarityScores).toHaveBeenCalledWith(
+      'run-1',
+      [3, 4],
+      expect.stringMatching(/^group-/),
+      10,
+      2
+    )
     wrapper.unmount()
   })
 })

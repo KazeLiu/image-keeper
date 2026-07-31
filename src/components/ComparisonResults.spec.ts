@@ -19,7 +19,12 @@ const store = reactive({
   setGroupingDistance: vi.fn(),
   selectGroup: vi.fn(),
   mergeSelectedGroups: vi.fn(),
-  getGroupSimilarityStatus: vi.fn((group: { group_index: number }) => statusByGroup.get(group.group_index))
+  getGroupSimilarityStatus: vi.fn((group: { group_index: number }) =>
+    statusByGroup.get(group.group_index) || {
+      status: 'pending',
+      message: '尚未比对，正在等待后台 SSIM 计算'
+    }
+  )
 })
 
 vi.mock('@/stores/comparisonStore', () => ({
@@ -58,6 +63,7 @@ describe('ComparisonResults group SSIM status', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     store.groups = [group(1), group(2), group(3)]
+    store.selectedGroupIndex = 1
     statusByGroup.clear()
     statusByGroup.set(1, { status: 'completed', message: '组内 SSIM 已比对完成并缓存' })
     statusByGroup.set(2, { status: 'running', message: '正在优先比对当前分组 SSIM' })
@@ -92,6 +98,26 @@ describe('ComparisonResults group SSIM status', () => {
       '正在优先比对当前分组 SSIM',
       '尚未比对，正在等待后台 SSIM 计算'
     ]))
+
+    wrapper.unmount()
+  })
+
+  it('renders at most one hundred groups at a time', async () => {
+    store.groups = Array.from({ length: 250 }, (_, index) => group(index + 1))
+
+    const wrapper = mount(ComparisonResults, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test="group-ssim-status"]')).toHaveLength(100)
+    expect(wrapper.find('[data-test="group-pagination"]').exists()).toBe(true)
+
+    store.selectedGroupIndex = 201
+    await flushPromises()
+    const visibleGroups = wrapper.findComponent({ name: 'ElTable' }).props('data') as any[]
+    expect(visibleGroups[0].group_index).toBe(201)
 
     wrapper.unmount()
   })

@@ -39,6 +39,17 @@ impl StandardSsim {
     }
 
     pub(crate) fn compute_gray(left: &GrayImage, right: &GrayImage) -> Result<f64> {
+        Self::compute_gray_cancellable(left, right, || false)
+    }
+
+    pub(crate) fn compute_gray_cancellable<F>(
+        left: &GrayImage,
+        right: &GrayImage,
+        mut is_cancelled: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> bool,
+    {
         if left.dimensions() != right.dimensions() {
             return Err(AppError::SsimComputation("图片尺寸不匹配".to_string()));
         }
@@ -50,8 +61,14 @@ impl StandardSsim {
         let mut score_sum = 0.0;
 
         for y in 0..left.height() {
+            if is_cancelled() {
+                return Err(AppError::SsimComputation("SSIM 计算已取消".to_string()));
+            }
             let required_rows = required_source_rows(y, left.height());
             for source_y in &required_rows {
+                if is_cancelled() {
+                    return Err(AppError::SsimComputation("SSIM 计算已取消".to_string()));
+                }
                 horizontal_rows
                     .entry(*source_y)
                     .or_insert_with(|| horizontal_stats_row(left, right, *source_y, &kernel));
@@ -215,5 +232,24 @@ mod tests {
 
         // 由独立的二维 11×11 高斯卷积参考实现生成。
         assert!((score - 0.383_446_772_514_431).abs() < 1e-12, "{score}");
+    }
+
+    #[test]
+    fn cancellable_compute_stops_during_row_processing() {
+        use std::cell::Cell;
+
+        let left = GrayImage::from_pixel(64, 64, Luma([120]));
+        let right = GrayImage::from_pixel(64, 64, Luma([121]));
+        let checks = Cell::new(0);
+
+        let error = StandardSsim::compute_gray_cancellable(&left, &right, || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 3
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("已取消"));
+        assert!(checks.get() >= 3);
     }
 }

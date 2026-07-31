@@ -52,7 +52,7 @@
 
       <el-table
         v-else
-        :data="store.groups"
+        :data="pagedGroups"
         row-key="group_index"
         height="100%"
         class="group-table"
@@ -139,6 +139,19 @@
           <template #default="{ row }">{{ row.member_count }}</template>
         </el-table-column>
       </el-table>
+
+      <div v-if="store.groups.length > GROUP_PAGE_SIZE" class="group-pagination">
+        <el-pagination
+          v-model:current-page="currentPage"
+          data-test="group-pagination"
+          small
+          background
+          layout="prev, pager, next"
+          :page-size="GROUP_PAGE_SIZE"
+          :total="store.groups.length"
+          :pager-count="5"
+        />
+      </div>
     </el-card>
 
     <el-dialog v-model="mergeConfirmVisible" title="确认合并分组" width="420px">
@@ -155,7 +168,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -163,6 +176,26 @@ import { useComparisonStore } from '@/stores/comparisonStore'
 import type { ComparisonGroup, ComparisonGroupMember } from '@/types'
 
 const store = useComparisonStore()
+const GROUP_PAGE_SIZE = 100
+const currentPage = ref(1)
+const pagedGroups = computed(() => {
+  const start = (currentPage.value - 1) * GROUP_PAGE_SIZE
+  return store.groups.slice(start, start + GROUP_PAGE_SIZE)
+})
+
+watch(
+  [() => store.groups.length, () => store.selectedGroupIndex, () => store.groupingDataRevision],
+  () => {
+    const selectedIndex = store.groups.findIndex(
+      (group) => group.group_index === store.selectedGroupIndex
+    )
+    const maxPage = Math.max(1, Math.ceil(store.groups.length / GROUP_PAGE_SIZE))
+    currentPage.value = selectedIndex >= 0
+      ? Math.floor(selectedIndex / GROUP_PAGE_SIZE) + 1
+      : Math.min(currentPage.value, maxPage)
+  },
+  { immediate: true }
+)
 
 const groupingMarks = {
   0: '严格',
@@ -367,6 +400,15 @@ function getRowClassName({ row }: { row: ComparisonGroup }) {
     padding-left: 0;
     overflow: hidden;
   }
+}
+
+.group-pagination {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding: 8px 12px;
+  border-top: 1px solid #ebeef5;
+  background: #ffffff;
 }
 
 .ssim-status-light {

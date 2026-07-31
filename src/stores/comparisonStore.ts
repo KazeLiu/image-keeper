@@ -95,6 +95,8 @@ export const useComparisonStore = defineStore('comparison', () => {
   let groupingRefreshTimer: ReturnType<typeof window.setTimeout> | null = null
   let unlistenGroupSimilarityStatus: UnlistenFn | null = null
   let groupSimilarityStatusListenerPromise: Promise<void> | null = null
+  let historyLoadGeneration = 0
+  let groupingRefreshGeneration = 0
   const bufferedProgress = new Map<string, MultiCompareProgressEvent>()
   const bufferedCompletions = new Set<string>()
 
@@ -319,32 +321,47 @@ export const useComparisonStore = defineStore('comparison', () => {
 
   async function refreshGroups() {
     if (!currentRunId.value) return
+    const runId = currentRunId.value
+    const distance = appliedGroupingDistance.value
+    const refreshGeneration = ++groupingRefreshGeneration
     isRefreshingGroups.value = true
     try {
-      autoGroups.value = await getComparisonGroups(currentRunId.value, appliedGroupingDistance.value)
+      const nextGroups = await getComparisonGroups(runId, distance)
+      if (
+        refreshGeneration !== groupingRefreshGeneration ||
+        runId !== currentRunId.value ||
+        distance !== appliedGroupingDistance.value
+      ) return
+
+      autoGroups.value = nextGroups
       groupingDataRevision.value += 1
       ensureSelectedGroup()
-      await refreshGroupSimilarityStatuses()
+      void refreshGroupSimilarityStatuses()
     } finally {
-      isRefreshingGroups.value = false
+      if (refreshGeneration === groupingRefreshGeneration) {
+        isRefreshingGroups.value = false
+      }
     }
   }
 
   async function refreshAnalysisData() {
     if (!currentRunId.value) return
+    const runId = currentRunId.value
+    const distance = appliedGroupingDistance.value
 
     const [nextStats, nextResults, nextGroups] = await Promise.all([
-      getComparisonStats(currentRunId.value),
-      getComparisonResults(currentRunId.value),
-      getComparisonGroups(currentRunId.value, appliedGroupingDistance.value)
+      getComparisonStats(runId),
+      getComparisonResults(runId),
+      getComparisonGroups(runId, distance)
     ])
+    if (runId !== currentRunId.value || distance !== appliedGroupingDistance.value) return
 
     stats.value = nextStats
     results.value = nextResults
     autoGroups.value = nextGroups
     groupingDataRevision.value += 1
     ensureSelectedGroup()
-    await refreshGroupSimilarityStatuses()
+    void refreshGroupSimilarityStatuses()
   }
 
   async function refreshHistory() {
@@ -380,6 +397,7 @@ export const useComparisonStore = defineStore('comparison', () => {
   async function loadHistoryRun(runId: string) {
     cleanupRuntime()
     resetProgress()
+    const loadGeneration = historyLoadGeneration
 
     isLoadingHistory.value = true
     errorMessage.value = ''
@@ -388,7 +406,11 @@ export const useComparisonStore = defineStore('comparison', () => {
 
     try {
       const snapshot = await getRunStatus(runId)
-      if (snapshot.run_id !== currentRunId.value) return
+      if (
+        loadGeneration !== historyLoadGeneration ||
+        runId !== currentRunId.value ||
+        snapshot.run_id !== runId
+      ) return
 
       applyRunStatus(snapshot)
 
@@ -402,12 +424,15 @@ export const useComparisonStore = defineStore('comparison', () => {
       await setupRuntimeListeners()
       startStatusPolling()
     } catch (error) {
+      if (loadGeneration !== historyLoadGeneration || runId !== currentRunId.value) return
       currentRunId.value = ''
       currentPhase.value = ''
       errorMessage.value = '加载历史记录失败'
       throw error
     } finally {
-      isLoadingHistory.value = false
+      if (loadGeneration === historyLoadGeneration) {
+        isLoadingHistory.value = false
+      }
     }
   }
 
@@ -439,6 +464,10 @@ export const useComparisonStore = defineStore('comparison', () => {
   }
 
   function resetProgress() {
+    historyLoadGeneration += 1
+    groupingRefreshGeneration += 1
+    isLoadingHistory.value = false
+    isRefreshingGroups.value = false
     progressModel.phase = ''
     progressModel.totalFiles = 0
     progressModel.processedFiles = 0
