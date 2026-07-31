@@ -178,6 +178,51 @@ describe('ComparisonGroupDetail threshold semantics', () => {
     wrapper.unmount()
   })
 
+  it('keeps originals without thumbnails collapsed when they are shown', async () => {
+    apiMocks.getGroupSimilarityScores.mockResolvedValueOnce([{
+      left_image_id: 1,
+      right_image_id: 2,
+      ssim_score: 0.971947,
+      error_message: null
+    }])
+    store.selectedGroup = {
+      group_index: 1,
+      representative_image_id: 1,
+      representative_file_name: '1.png',
+      member_count: 3,
+      has_low_quality_suggestion: true,
+      members: [
+        member(1),
+        member(2),
+        member(3, {
+          file_size: 3_000_000,
+          width: 1450,
+          height: 2320,
+          ssim_score: 0.99,
+          role: 'similar_keep',
+          role_label: '相似保留',
+          is_low_quality_suggestion: false
+        })
+      ]
+    }
+
+    const wrapper = mount(ComparisonGroupDetail, {
+      attachTo: document.body,
+      global: { plugins: [ElementPlus] }
+    })
+    await flushPromises()
+
+    expect(wrapper.findAll('.thumbnail-panel')).toHaveLength(1)
+    const showEmptySwitch = wrapper.getComponent({ name: 'ElSwitch' })
+    showEmptySwitch.vm.$emit('update:modelValue', true)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('3.png')
+    expect(wrapper.findAll('.thumbnail-panel')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('这张原图下暂无缩略图')
+    wrapper.unmount()
+  })
+
   it('drops a checked thumbnail when the judgment threshold reclassifies it as an original', async () => {
     apiMocks.getGroupSimilarityScores.mockResolvedValueOnce([])
     store.selectedGroup = {

@@ -33,7 +33,14 @@
         </div>
 
         <div class="edit-toolbar">
-          <el-switch v-model="store.groupEditMode" active-text="分组编辑" inactive-text="查看模式" />
+          <div class="view-switches">
+            <el-switch v-model="store.groupEditMode" active-text="分组编辑" inactive-text="查看模式" />
+            <el-switch
+              v-model="showOnlyThumbnailGroups"
+              data-test="thumbnail-group-filter"
+              active-text="只看缩略图"
+            />
+          </div>
           <div v-if="store.groupEditMode" class="merge-actions">
             <span class="selection-count">已选 {{ store.selectedGroupIds.length }} 组</span>
             <el-button
@@ -48,7 +55,10 @@
         </div>
       </div>
 
-      <el-empty v-if="store.groups.length === 0" description="暂无分组结果" />
+      <el-empty
+        v-if="displayedGroups.length === 0"
+        :description="emptyDescription"
+      />
 
       <el-table
         v-else
@@ -138,9 +148,21 @@
         <el-table-column label="图片数量" width="90" align="center">
           <template #default="{ row }">{{ row.member_count }}</template>
         </el-table-column>
+        <el-table-column label="缩略图" width="102" align="center">
+          <template #default="{ row }">
+            <el-tag
+              data-test="group-thumbnail-status"
+              size="small"
+              effect="light"
+              :type="getGroupThumbnailState(row).tagType"
+            >
+              {{ getGroupThumbnailState(row).label }}
+            </el-tag>
+          </template>
+        </el-table-column>
       </el-table>
 
-      <div v-if="store.groups.length > GROUP_PAGE_SIZE" class="group-pagination">
+      <div v-if="displayedGroups.length > GROUP_PAGE_SIZE" class="group-pagination">
         <el-pagination
           v-model:current-page="currentPage"
           data-test="group-pagination"
@@ -148,7 +170,7 @@
           background
           layout="prev, pager, next"
           :page-size="GROUP_PAGE_SIZE"
-          :total="store.groups.length"
+          :total="displayedGroups.length"
           :pager-count="5"
         />
       </div>
@@ -173,23 +195,49 @@ import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { useComparisonStore } from '@/stores/comparisonStore'
+import { groupHasThumbnailCandidates } from '@/features/groupThumbnails'
+import { readStoredRecognitionThreshold } from '@/features/similarity'
 import type { ComparisonGroup, ComparisonGroupMember } from '@/types'
 
 const store = useComparisonStore()
 const GROUP_PAGE_SIZE = 100
 const currentPage = ref(1)
+const showOnlyThumbnailGroups = ref(false)
+const originalRecognitionThreshold = readStoredRecognitionThreshold(window.localStorage)
+
+type GroupThumbnailStateValue = 'pending' | 'running' | 'has' | 'empty'
+
+interface GroupThumbnailState {
+  value: GroupThumbnailStateValue
+  label: string
+  tagType: 'success' | 'info' | 'warning'
+}
+
+const groupThumbnailStates = computed(() => new Map(
+  store.groups.map((group) => [group.group_index, resolveGroupThumbnailState(group)])
+))
+const displayedGroups = computed(() => (
+  showOnlyThumbnailGroups.value
+    ? store.groups.filter((group) => getGroupThumbnailState(group).value === 'has')
+    : store.groups
+))
+const emptyDescription = computed(() => (
+  showOnlyThumbnailGroups.value && store.groups.length > 0
+    ? '暂无已完成 SSIM 且有缩略图的分组，后台完成后会自动加入'
+    : '暂无分组结果'
+))
 const pagedGroups = computed(() => {
   const start = (currentPage.value - 1) * GROUP_PAGE_SIZE
-  return store.groups.slice(start, start + GROUP_PAGE_SIZE)
+  return displayedGroups.value.slice(start, start + GROUP_PAGE_SIZE)
 })
 
 watch(
-  [() => store.groups.length, () => store.selectedGroupIndex, () => store.groupingDataRevision],
+  [() => displayedGroups.value.length, () => store.selectedGroupIndex, () => store.groupingDataRevision],
   () => {
-    const selectedIndex = store.groups.findIndex(
+    const selectedIndex = displayedGroups.value.findIndex(
       (group) => group.group_index === store.selectedGroupIndex
     )
-    const maxPage = Math.max(1, Math.ceil(store.groups.length / GROUP_PAGE_SIZE))
+    const maxPage = Math.max(1, Math.ceil(displayedGroups.value.length / GROUP_PAGE_SIZE))
     currentPage.value = selectedIndex >= 0
       ? Math.floor(selectedIndex / GROUP_PAGE_SIZE) + 1
       : Math.min(currentPage.value, maxPage)
@@ -218,6 +266,29 @@ function handleRowClick(group: ComparisonGroup) {
 
 function getGroupSsimStatus(group: ComparisonGroup) {
   return store.getGroupSimilarityStatus(group)
+}
+
+/** 返回分组列表中展示和筛选共用的缩略图状态。 */
+function getGroupThumbnailState(group: ComparisonGroup): GroupThumbnailState {
+  return groupThumbnailStates.value.get(group.group_index) || {
+    value: 'pending',
+    label: '待 SSIM',
+    tagType: 'info'
+  }
+}
+
+/** 在 SSIM 完成后按详情页同一规则判断分组是否存在缩略图。 */
+function resolveGroupThumbnailState(group: ComparisonGroup): GroupThumbnailState {
+  const similarityStatus = getGroupSsimStatus(group)
+  if (similarityStatus.status === 'running') {
+    return { value: 'running', label: '比对中', tagType: 'warning' }
+  }
+  if (similarityStatus.status !== 'completed') {
+    return { value: 'pending', label: '待 SSIM', tagType: 'info' }
+  }
+  return groupHasThumbnailCandidates(group, originalRecognitionThreshold)
+    ? { value: 'has', label: '有缩略图', tagType: 'success' }
+    : { value: 'empty', label: '无缩略图', tagType: 'info' }
 }
 
 function handleMergeClick() {
@@ -347,6 +418,7 @@ function getRowClassName({ row }: { row: ComparisonGroup }) {
 
 .control-heading,
 .edit-toolbar,
+.view-switches,
 .merge-actions {
   display: flex;
   align-items: center;
@@ -384,6 +456,12 @@ function getRowClassName({ row }: { row: ComparisonGroup }) {
   justify-content: space-between;
   gap: 12px;
   margin-top: 12px;
+}
+
+.view-switches {
+  gap: 16px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .merge-actions {

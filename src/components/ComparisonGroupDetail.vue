@@ -141,7 +141,7 @@
         row-key="id"
         height="100%"
         class="detail-table"
-        :default-expand-all="true"
+        :expand-row-keys="defaultExpandedOriginalRowKeys"
         :row-class-name="getOriginalRowClassName"
         @row-click="handleOriginalRowClick"
       >
@@ -501,17 +501,16 @@ import type {
 } from '@/types'
 import {
   formatSsim,
-  parseStoredRecognitionThreshold,
+  ORIGINAL_RECOGNITION_THRESHOLD_KEY,
   precisionSliderValueToThreshold,
-  precisionThresholdToSliderValue
+  precisionThresholdToSliderValue,
+  readStoredRecognitionThreshold
 } from '@/features/similarity'
+import { getAutomaticOriginalImageIds } from '@/features/groupThumbnails'
 
 const store = useComparisonStore()
 const candidateSsimColumnHelp = '候选图与当前所在行原图的标准 SSIM，用于确认它被归到哪张原图下。'
 const originalBasisColumnHelp = '说明图片为何被列为原图。自动识别会综合分辨率、画面比例和原图拆分阈值；手动设置优先。'
-const ORIGINAL_RECOGNITION_THRESHOLD_KEY = 'imagekeeper:original-recognition-ssim'
-const LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
-
 type OriginalRowSource = 'auto' | 'manual' | 'fallback'
 
 interface OriginalRow {
@@ -534,7 +533,7 @@ const viewerIndex = ref(0)
 const viewerZoom = ref(1)
 const thresholdPopoverVisible = ref(false)
 const isRecycling = ref(false)
-const originalRecognitionThreshold = ref(readStoredOriginalRecognitionThreshold())
+const originalRecognitionThreshold = ref(readStoredRecognitionThreshold(window.localStorage))
 const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
 const showEmptyOriginalRows = ref(false)
@@ -581,6 +580,11 @@ const visibleOriginalRows = computed(() =>
 )
 const hiddenOriginalRowCount = computed(() =>
   originalRows.value.filter((row) => row.candidates.length === 0).length
+)
+const defaultExpandedOriginalRowKeys = computed(() =>
+  visibleOriginalRows.value
+    .filter((row) => row.candidates.length > 0)
+    .map((row) => row.id)
 )
 const thumbnailCandidates = computed(() => originalRows.value.flatMap((row) => row.candidates))
 const checkedDeleteCandidates = computed(() =>
@@ -896,13 +900,6 @@ async function confirmRecycleSelected() {
   }
 }
 
-function readStoredOriginalRecognitionThreshold() {
-  return parseStoredRecognitionThreshold(
-    window.localStorage.getItem(ORIGINAL_RECOGNITION_THRESHOLD_KEY),
-    window.localStorage.getItem(LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY)
-  )
-}
-
 function rememberOriginalRecognitionThreshold(value: number) {
   window.localStorage.setItem(ORIGINAL_RECOGNITION_THRESHOLD_KEY, value.toFixed(4))
 }
@@ -1117,11 +1114,16 @@ function buildOriginalRows(members: ComparisonGroupMember[]): OriginalRow[] {
 
 function chooseOriginalMembers(members: ComparisonGroupMember[]) {
   const maxPixels = Math.max(...members.map(getPixels))
-  const maxAspect = getAspectRatio(getHighestQualityMember(members))
+  const automaticOriginalIds = group.value
+    ? getAutomaticOriginalImageIds(group.value, originalRecognitionThreshold.value)
+    : new Set<number>()
 
   const originals = members
     .filter((member) => !manualThumbnailIds.value.includes(member.image_id))
-    .filter((member) => manualOriginalIds.value.includes(member.image_id) || isAutoOriginal(member, maxPixels, maxAspect))
+    .filter((member) => (
+      manualOriginalIds.value.includes(member.image_id)
+      || automaticOriginalIds.has(member.image_id)
+    ))
     .map((member) => ({
       member,
       source: manualOriginalIds.value.includes(member.image_id) ? 'manual' as const : 'auto' as const,
@@ -1139,17 +1141,6 @@ function chooseOriginalMembers(members: ComparisonGroupMember[]) {
     source: 'fallback' as const,
     reason: '组内最大的图片，默认作为原图'
   }]
-}
-
-function isAutoOriginal(member: ComparisonGroupMember, maxPixels: number, maxAspect: number) {
-  if (group.value && member.image_id === group.value.representative_image_id) return true
-  if (member.role === 'reference') return true
-
-  const highResolution = getPixels(member) >= maxPixels * 0.9
-  const sameShape = getAspectDiff(member, maxAspect) <= 0.02
-  const similarEnough = typeof member.ssim_score !== 'number' || member.ssim_score >= originalRecognitionThreshold.value
-
-  return highResolution && sameShape && similarEnough
 }
 
 function getAutoOriginalReason(member: ComparisonGroupMember, maxPixels: number) {
@@ -1247,16 +1238,6 @@ function compareQuality(left: ComparisonGroupMember, right: ComparisonGroupMembe
 
 function getPixels(member: ComparisonGroupMember) {
   return member.width * member.height
-}
-
-function getAspectRatio(member: ComparisonGroupMember) {
-  if (member.height === 0) return 0
-  return member.width / member.height
-}
-
-function getAspectDiff(member: ComparisonGroupMember, referenceAspect: number) {
-  if (referenceAspect === 0) return 0
-  return Math.abs(getAspectRatio(member) - referenceAspect) / referenceAspect
 }
 
 function openImageViewer(imageId: number) {

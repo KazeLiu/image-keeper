@@ -1,3 +1,6 @@
+export const ORIGINAL_RECOGNITION_THRESHOLD_KEY = 'imagekeeper:original-recognition-ssim'
+export const LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY = 'imagekeeper:original-recognition-percent'
+
 export function formatSsim(value: number) {
   return value.toFixed(6)
 }
@@ -43,4 +46,12 @@ export function parseStoredRecognitionThreshold(
     }
   }
   return 0.985
+}
+
+/** 从本地设置读取原图拆分阈值，并兼容旧版百分比字段。 */
+export function readStoredRecognitionThreshold(storage: Pick<Storage, 'getItem'>) {
+  return parseStoredRecognitionThreshold(
+    storage.getItem(ORIGINAL_RECOGNITION_THRESHOLD_KEY),
+    storage.getItem(LEGACY_ORIGINAL_RECOGNITION_PERCENT_KEY)
+  )
 }
