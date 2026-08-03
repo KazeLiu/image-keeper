@@ -1,5 +1,5 @@
 use crate::core::algorithm_profile::{
-    algorithm_pool, background_algorithm_pool, ALGORITHM_WORKER_COUNT, CURRENT_ALGORITHM_PROFILE_ID,
+    algorithm_pool, algorithm_worker_count, background_algorithm_pool, CURRENT_ALGORITHM_PROFILE_ID,
 };
 use crate::db::models::{AnalysisType, ComparisonStats, RunStatus};
 use crate::db::repository::{Repository, RunConfig};
@@ -1604,7 +1604,7 @@ fn build_group_similarity_image_cache_jobs(
     for pair in plan {
         let left = &images[pair.left_index];
         let right = &images[pair.right_index];
-        let (target_width, target_height) = SsimComputer::pair_target_dimensions(
+        let (target_width, target_height) = SsimComputer::task_target_dimensions(
             (left.width, left.height),
             (right.width, right.height),
         );
@@ -1699,7 +1699,7 @@ fn compute_group_similarity_pair(
 ) -> GroupSimilarityScore {
     use crate::core::ssim::compute::SsimComputer;
 
-    let (target_width, target_height) = SsimComputer::pair_target_dimensions(
+    let (target_width, target_height) = SsimComputer::task_target_dimensions(
         (left.width, left.height),
         (right.width, right.height),
     );
@@ -2377,7 +2377,7 @@ fn run_config_from_settings(settings: &crate::db::models::Settings) -> RunConfig
             ".git".to_string(),
             "node_modules".to_string(),
         ]),
-        max_workers: ALGORITHM_WORKER_COUNT as i32,
+        max_workers: algorithm_worker_count() as i32,
     }
 }
 
@@ -4234,7 +4234,7 @@ mod tests {
         assert_eq!(config.variant_review_lower_bound, 0.72);
         assert_eq!(config.phash_max_distance, 8);
         assert_eq!(config.aspect_ratio_tolerance, 0.004);
-        assert_eq!(config.max_workers, ALGORITHM_WORKER_COUNT as i32);
+        assert_eq!(config.max_workers, algorithm_worker_count() as i32);
     }
 
     #[test]

@@ -38,3 +38,13 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# SSIM 内核是纯标量浮点热路径，需要跨 crate 内联才能拿到 image / fast_image_resize 的优化。
+# 不设 panic = "abort"：Tauri command 依赖 unwind 把单个分组的 panic 转成错误返回。
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+# 开发态跑真实图片时避免依赖库退化到无优化，否则 SSIM 调试基本不可用。
+[profile.dev.package."*"]
+opt-level = 2
