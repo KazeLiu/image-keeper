@@ -162,11 +162,11 @@ struct GroupSimilarityPlanPair {
     right_index: usize,
 }
 
+/// 一张图片在本组内需要缓存的全部目标尺寸，合并后只解码一次原图。
 #[derive(Debug, Clone)]
 struct GroupSimilarityImageCacheJob {
     image_index: usize,
-    target_width: u32,
-    target_height: u32,
+    targets: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -254,9 +254,7 @@ static GROUP_SIMILARITY_CACHE: OnceLock<
 static GROUP_SIMILARITY_RESULT_CACHE: OnceLock<
     Mutex<HashMap<GroupSimilarityResultCacheKey, Vec<GroupSimilarityScore>>>,
 > = OnceLock::new();
-static GROUP_SIMILARITY_IMAGE_CACHE: OnceLock<
-    Mutex<HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>>,
-> = OnceLock::new();
+static GROUP_SIMILARITY_IMAGE_CACHE: OnceLock<Mutex<SimilarityImageCache>> = OnceLock::new();
 
 fn read_run_status(repo: &Repository, run_id: &str) -> Result<RunStatusResponse> {
     let run = repo
@@ -751,41 +749,47 @@ fn refresh_current_file_fingerprints_for_request(
 ) -> Result<()> {
     for image in images {
         ensure_group_similarity_request_active(request)?;
-        let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
-            AppError::FileSystem(format!("无法读取图片 {}: {error}", image.relative_path))
-        })?;
-        ensure_group_similarity_request_active(request)?;
-        let metadata = std::fs::metadata(&canonical)?;
-        if !metadata.is_file() {
-            return Err(AppError::ValidationError(format!(
-                "图片已不再是普通文件，请重新运行任务: {}",
-                image.relative_path
-            )));
-        }
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-        let current_modified_secs = modified
-            .as_ref()
-            .map(|duration| duration.as_secs() as i64)
-            .unwrap_or_default();
-
-        if metadata.len() != image.file_size.max(0) as u64
-            || current_modified_secs != image.file_modified_at
-        {
-            return Err(AppError::ValidationError(format!(
-                "图片在任务完成后已发生变化，请重新运行任务: {}",
-                image.relative_path
-            )));
-        }
-
-        image.canonical_file_path = canonical.to_string_lossy().into_owned();
-        image.current_file_size = metadata.len();
-        image.current_modified_ns = modified
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
+        refresh_one_current_file_fingerprint(image)?;
     }
+
+    Ok(())
+}
+
+/// 校验单张图片自任务完成后未被改动，并回填当前文件指纹。
+fn refresh_one_current_file_fingerprint(image: &mut ImageSummary) -> Result<()> {
+    let canonical = std::fs::canonicalize(Path::new(&image.file_path)).map_err(|error| {
+        AppError::FileSystem(format!("无法读取图片 {}: {error}", image.relative_path))
+    })?;
+    let metadata = std::fs::metadata(&canonical)?;
+    if !metadata.is_file() {
+        return Err(AppError::ValidationError(format!(
+            "图片已不再是普通文件，请重新运行任务: {}",
+            image.relative_path
+        )));
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    let current_modified_secs = modified
+        .as_ref()
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+
+    if metadata.len() != image.file_size.max(0) as u64
+        || current_modified_secs != image.file_modified_at
+    {
+        return Err(AppError::ValidationError(format!(
+            "图片在任务完成后已发生变化，请重新运行任务: {}",
+            image.relative_path
+        )));
+    }
+
+    image.canonical_file_path = canonical.to_string_lossy().into_owned();
+    image.current_file_size = metadata.len();
+    image.current_modified_ns = modified
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
 
     Ok(())
 }
@@ -1155,9 +1159,8 @@ fn group_similarity_result_cache(
     GROUP_SIMILARITY_RESULT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn group_similarity_image_cache(
-) -> &'static Mutex<HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>> {
-    GROUP_SIMILARITY_IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn group_similarity_image_cache() -> &'static Mutex<SimilarityImageCache> {
+    GROUP_SIMILARITY_IMAGE_CACHE.get_or_init(|| Mutex::new(SimilarityImageCache::default()))
 }
 
 fn insert_group_similarity_result_cache_entry(
@@ -1200,7 +1203,7 @@ fn clear_group_similarity_memory_cache_for_run(run_id: &str) {
     group_similarity_image_cache()
         .lock()
         .unwrap()
-        .retain(|key, _| key.run_id != run_id);
+        .retain_runs(|key| key.run_id != run_id);
 }
 
 fn clear_group_similarity_memory_cache_if_run_missing(
@@ -1215,25 +1218,95 @@ fn clear_group_similarity_memory_cache_if_run_missing(
     Ok(true)
 }
 
-fn similarity_image_cache_bytes(
-    cache: &HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>,
-) -> usize {
-    cache.values().map(|image| image.gray.as_raw().len()).sum()
+/// 带访问序与字节累计的灰度图缓存。
+///
+/// 组间从不整体清理，因此必须按最近使用淘汰：任意顺序淘汰会踢掉当前活跃组正在用的图，
+/// 却把早已结束的组的死条目留下。
+#[derive(Default)]
+struct SimilarityImageCache {
+    entries: HashMap<SimilarityImageCacheKey, (Arc<CachedSimilarityImage>, u64)>,
+    total_bytes: usize,
+    next_tick: u64,
 }
 
-fn insert_similarity_image_cache_entry(
-    cache: &mut HashMap<SimilarityImageCacheKey, Arc<CachedSimilarityImage>>,
-    cache_key: SimilarityImageCacheKey,
-    cached_image: Arc<CachedSimilarityImage>,
-    byte_budget: usize,
-) {
-    cache.insert(cache_key.clone(), cached_image);
-
-    while cache.len() > 1 && similarity_image_cache_bytes(cache) > byte_budget {
-        let Some(eviction_key) = cache.keys().find(|key| *key != &cache_key).cloned() else {
-            break;
+impl SimilarityImageCache {
+    fn get(&mut self, cache_key: &SimilarityImageCacheKey) -> Option<Arc<CachedSimilarityImage>> {
+        let tick = self.next_tick;
+        let Some((cached_image, last_used)) = self.entries.get_mut(cache_key) else {
+            return None;
         };
-        cache.remove(&eviction_key);
+        *last_used = tick;
+        self.next_tick += 1;
+        Some(Arc::clone(cached_image))
+    }
+
+    fn contains_key(&self, cache_key: &SimilarityImageCacheKey) -> bool {
+        self.entries.contains_key(cache_key)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &SimilarityImageCacheKey> {
+        self.entries.keys()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    fn retain_runs<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&SimilarityImageCacheKey) -> bool,
+    {
+        let mut removed_bytes = 0;
+        self.entries.retain(|cache_key, (cached_image, _)| {
+            if keep(cache_key) {
+                return true;
+            }
+            removed_bytes += cached_image.gray.as_raw().len();
+            false
+        });
+        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
+    }
+
+    /// 插入新条目并按最近最少使用淘汰，直到总字节回落到预算内。
+    fn insert(
+        &mut self,
+        cache_key: SimilarityImageCacheKey,
+        cached_image: Arc<CachedSimilarityImage>,
+        byte_budget: usize,
+    ) {
+        let inserted_bytes = cached_image.gray.as_raw().len();
+        let tick = self.next_tick;
+        self.next_tick += 1;
+        if let Some((previous_image, _)) = self
+            .entries
+            .insert(cache_key.clone(), (cached_image, tick))
+        {
+            self.total_bytes = self
+                .total_bytes
+                .saturating_sub(previous_image.gray.as_raw().len());
+        }
+        self.total_bytes += inserted_bytes;
+
+        while self.entries.len() > 1 && self.total_bytes > byte_budget {
+            let Some(eviction_key) = self
+                .entries
+                .iter()
+                .filter(|(key, _)| *key != &cache_key)
+                .min_by_key(|(_, (_, last_used))| *last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some((evicted_image, _)) = self.entries.remove(&eviction_key) {
+                self.total_bytes = self
+                    .total_bytes
+                    .saturating_sub(evicted_image.gray.as_raw().len());
+            }
+        }
     }
 }
 
@@ -1591,6 +1664,7 @@ fn emit_group_similarity_status(window: &Window, status: &GroupSimilarityStatus)
     let _ = window.emit("group-similarity-status", status);
 }
 
+/// 汇总每张图片需要的目标尺寸，使同一张原图在整组内只解码一次。
 fn build_group_similarity_image_cache_jobs(
     run_id: &str,
     images: &[ImageSummary],
@@ -1598,7 +1672,8 @@ fn build_group_similarity_image_cache_jobs(
 ) -> Vec<GroupSimilarityImageCacheJob> {
     use crate::core::ssim::compute::SsimComputer;
 
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<GroupSimilarityImageCacheJob> = Vec::new();
+    let mut job_index_by_image = HashMap::new();
     let mut seen_keys = HashSet::new();
 
     for pair in plan {
@@ -1612,13 +1687,18 @@ fn build_group_similarity_image_cache_jobs(
         for image_index in [pair.left_index, pair.right_index] {
             let image = &images[image_index];
             let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
-            if seen_keys.insert(cache_key) {
+            if !seen_keys.insert(cache_key) {
+                continue;
+            }
+
+            let job_index = *job_index_by_image.entry(image_index).or_insert_with(|| {
                 jobs.push(GroupSimilarityImageCacheJob {
                     image_index,
-                    target_width,
-                    target_height,
+                    targets: Vec::new(),
                 });
-            }
+                jobs.len() - 1
+            });
+            jobs[job_index].targets.push((target_width, target_height));
         }
     }
 
@@ -1649,12 +1729,7 @@ fn prepare_similarity_image(
 
     ensure_group_similarity_request_active(request)?;
     let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
-    if let Some(cached_image) = group_similarity_image_cache()
-        .lock()
-        .unwrap()
-        .get(&cache_key)
-        .cloned()
-    {
+    if let Some(cached_image) = group_similarity_image_cache().lock().unwrap().get(&cache_key) {
         return Ok(cached_image);
     }
 
@@ -1664,15 +1739,49 @@ fn prepare_similarity_image(
     ensure_group_similarity_request_active(request)?;
     let cached_image = Arc::new(CachedSimilarityImage { gray: gray_image });
 
-    let mut cache = group_similarity_image_cache().lock().unwrap();
-    insert_similarity_image_cache_entry(
-        &mut cache,
+    group_similarity_image_cache().lock().unwrap().insert(
         cache_key,
         Arc::clone(&cached_image),
         GROUP_SIMILARITY_IMAGE_CACHE_BYTE_BUDGET,
     );
 
     Ok(cached_image)
+}
+
+/// 一次解码原图并产出它在本组内需要的全部目标尺寸灰度图。
+fn cache_similarity_image_targets(
+    run_id: &str,
+    image: &ImageSummary,
+    targets: &[(u32, u32)],
+    request: Option<&GroupSimilarityForegroundRequest>,
+) -> Result<()> {
+    use crate::core::ssim::compute::SsimComputer;
+
+    ensure_group_similarity_request_active(request)?;
+    let missing_targets = targets
+        .iter()
+        .copied()
+        .filter(|(target_width, target_height)| {
+            !has_cached_similarity_image(run_id, image, *target_width, *target_height)
+        })
+        .collect::<Vec<_>>();
+    if missing_targets.is_empty() {
+        return Ok(());
+    }
+
+    let source_image = image::open(Path::new(&image.file_path))?;
+    for (target_width, target_height) in missing_targets {
+        ensure_group_similarity_request_active(request)?;
+        let gray_image = SsimComputer::prepare_image(&source_image, target_width, target_height)?;
+        let cache_key = similarity_image_cache_key(run_id, image, target_width, target_height);
+        group_similarity_image_cache().lock().unwrap().insert(
+            cache_key,
+            Arc::new(CachedSimilarityImage { gray: gray_image }),
+            GROUP_SIMILARITY_IMAGE_CACHE_BYTE_BUDGET,
+        );
+    }
+
+    Ok(())
 }
 
 fn compute_similarity_from_cached_images(
@@ -1837,15 +1946,10 @@ fn compute_group_similarity_scores_with_cache_policy(
                 return;
             }
             let image = &images[job.image_index];
-            let was_cached =
-                has_cached_similarity_image(run_id, image, job.target_width, job.target_height);
-            let _ = prepare_similarity_image(
-                run_id,
-                image,
-                job.target_width,
-                job.target_height,
-                request,
-            );
+            let was_cached = job.targets.iter().all(|(target_width, target_height)| {
+                has_cached_similarity_image(run_id, image, *target_width, *target_height)
+            });
+            let _ = cache_similarity_image_targets(run_id, image, &job.targets, request);
             let processed = processed_cache_images.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             let hits = if was_cached {
                 image_cache_hits.fetch_add(1, AtomicOrdering::SeqCst) + 1
@@ -1926,28 +2030,8 @@ fn compute_group_similarity_scores_with_cache_policy(
                     return Some(cached_score);
                 }
 
-                if let Some(window) = &progress_window {
-                    emit_group_similarity_progress(
-                        window,
-                        group_similarity_progress(
-                            request_id,
-                            "running",
-                            "comparing",
-                            total_pairs,
-                            processed_pairs.load(AtomicOrdering::SeqCst),
-                            total_cache_images,
-                            processed_cache_images,
-                            Some(left),
-                            Some(right),
-                            None,
-                            cache_hits.load(AtomicOrdering::SeqCst),
-                            image_cache_hits,
-                            computed_pairs.load(AtomicOrdering::SeqCst),
-                            skipped_pairs,
-                        ),
-                    );
-                }
-
+                // 计算前不再单独推送一次进度：它与算完那次只差计数，
+                // 却让每个 pair 的 IPC 事件量翻倍。
                 let score = compute_group_similarity_pair(run_id, left, right, request);
 
                 let processed = processed_pairs.fetch_add(1, AtomicOrdering::SeqCst) + 1;
@@ -2131,6 +2215,25 @@ fn resolve_group_similarity_statuses(
         cached_member_signatures,
     } = snapshot;
 
+    // 只刷新真正参与多图分组的图片，且同一张图跨分组共用一次 stat 结果。
+    let mut refreshed_image_ids = groups
+        .iter()
+        .filter(|group| group.members.len() >= 2)
+        .flat_map(|group| group.members.iter().map(|member| member.image_id))
+        .collect::<Vec<_>>();
+    refreshed_image_ids.sort_unstable();
+    refreshed_image_ids.dedup();
+
+    // 逐张记录刷新结果：某张图片被改动只应影响包含它的分组，不能波及其他分组。
+    let refreshed_images_by_id = refreshed_image_ids
+        .par_iter()
+        .filter_map(|image_id| {
+            let mut image = images_by_id.get(image_id)?.clone();
+            let outcome = refresh_one_current_file_fingerprint(&mut image).map(|()| image);
+            Some((*image_id, outcome))
+        })
+        .collect::<HashMap<_, _>>();
+
     groups
         .into_iter()
         .map(|group| {
@@ -2151,16 +2254,22 @@ fn resolve_group_similarity_statuses(
             }
 
             let persisted = (|| -> Result<bool> {
-                let mut images = group
+                let images = group
                     .members
                     .iter()
                     .map(|member| {
-                        images_by_id.get(&member.image_id).cloned().ok_or_else(|| {
-                            AppError::Internal(format!("分组图片记录不存在: {}", member.image_id))
-                        })
+                        match refreshed_images_by_id.get(&member.image_id) {
+                            Some(Ok(image)) => Ok(image.clone()),
+                            Some(Err(error)) => {
+                                Err(AppError::ValidationError(error.to_string()))
+                            }
+                            None => Err(AppError::Internal(format!(
+                                "分组图片记录不存在: {}",
+                                member.image_id
+                            ))),
+                        }
                     })
                     .collect::<Result<Vec<_>>>()?;
-                refresh_current_file_fingerprints_for_request(&mut images, None)?;
                 let cache_key = group_similarity_result_cache_key(&run_id, &images);
                 let member_signature = group_similarity_member_signature(&cache_key)?;
                 Ok(cached_member_signatures.contains(&member_signature))
@@ -2547,8 +2656,15 @@ pub async fn get_comparison_groups(
     grouping_distance: Option<i32>,
     repo: State<'_, Arc<Mutex<Repository>>>,
 ) -> Result<Vec<ComparisonGroup>> {
-    let repo_lock = repo.lock().unwrap();
-    read_comparison_groups(&repo_lock, &run_id, grouping_distance)
+    // 缓存未命中时分组要跑 O(N²) 的两两比对，放到阻塞线程池里执行，
+    // 避免长时间独占 repo 锁把其他数据库命令一起拖住。
+    let repo = Arc::clone(repo.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo_lock = repo.lock().unwrap();
+        read_comparison_groups(&repo_lock, &run_id, grouping_distance)
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("读取相似分组失败: {error}")))?
 }
 
 /// 获取当前组内图片两两相似度，用于前端做“缩略图挂到最像原图”的交叉验证
@@ -3823,6 +3939,130 @@ mod tests {
     }
 
     #[test]
+    fn similarity_status_keeps_untouched_groups_completed_when_another_group_changes() {
+        // 去重刷新是整批做的，必须确认一组图片被改动不会把其他分组一起拖回 pending。
+        let temp = tempfile::tempdir().unwrap();
+        let stable_left = temp.path().join("stable-left.png");
+        let stable_right = temp.path().join("stable-right.png");
+        let volatile_left = temp.path().join("volatile-left.png");
+        let volatile_right = temp.path().join("volatile-right.png");
+        for (path, size, value) in [
+            (&stable_left, 8_u32, 120_u8),
+            (&stable_right, 4, 120),
+            (&volatile_left, 8, 60),
+            (&volatile_right, 4, 60),
+        ] {
+            GrayImage::from_pixel(size, size, Luma([value]))
+                .save(path)
+                .unwrap();
+        }
+
+        let summary_for = |id: i64, path: &std::path::Path, edge: u32, phash: &str| {
+            let metadata = std::fs::metadata(path).unwrap();
+            let modified_at = metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let mut summary = image_summary_for_plan(
+                id,
+                &path.to_string_lossy(),
+                edge,
+                edge,
+                metadata.len() as i64,
+                phash,
+            );
+            summary.file_path = path.to_string_lossy().into_owned();
+            summary.file_modified_at = modified_at;
+            summary
+        };
+
+        let images = vec![
+            summary_for(1, &stable_left, 8, "0000000000000001"),
+            summary_for(2, &stable_right, 4, "0000000000000001"),
+            summary_for(3, &volatile_left, 8, "00000000000000f0"),
+            summary_for(4, &volatile_right, 4, "00000000000000f0"),
+        ];
+        let images_by_id = images
+            .iter()
+            .cloned()
+            .map(|image| (image.id, image))
+            .collect::<HashMap<_, _>>();
+
+        let group_for = |group_index: usize, members: &[&ImageSummary]| {
+            let image_by_id = members
+                .iter()
+                .map(|image| (image.id, (*image).clone()))
+                .collect::<HashMap<_, _>>();
+            let reference = choose_group_reference(members);
+            ComparisonGroup {
+                group_index,
+                representative_image_id: reference.id,
+                representative_file_name: file_name_from_path(&reference.relative_path),
+                member_count: members.len(),
+                has_low_quality_suggestion: false,
+                members: members
+                    .iter()
+                    .map(|image| {
+                        build_group_member(image, reference, &image_by_id, &HashMap::new())
+                    })
+                    .collect(),
+            }
+        };
+
+        // 两组各自的成员签名都已落缓存。
+        let stable_members = [&images[0], &images[1]];
+        let volatile_members = [&images[2], &images[3]];
+        let mut cached_member_signatures = HashSet::new();
+        for members in [stable_members, volatile_members] {
+            let mut group_images = members
+                .iter()
+                .map(|image| (*image).clone())
+                .collect::<Vec<_>>();
+            refresh_current_file_fingerprints(&mut group_images).unwrap();
+            let cache_key = group_similarity_result_cache_key("run-1", &group_images);
+            cached_member_signatures.insert(group_similarity_member_signature(&cache_key).unwrap());
+        }
+
+        let build_snapshot = || GroupSimilarityStatusSnapshot {
+            run_id: "run-1".to_string(),
+            grouping_distance: 10,
+            groups: vec![
+                group_for(1, &stable_members),
+                group_for(2, &volatile_members),
+            ],
+            images_by_id: images_by_id.clone(),
+            running_group_index: None,
+            cached_member_signatures: cached_member_signatures.clone(),
+        };
+
+        let initial = resolve_group_similarity_statuses(build_snapshot()).unwrap();
+        assert!(
+            initial.iter().all(|status| status.status == "completed"),
+            "改动前两组都应命中缓存: {initial:?}"
+        );
+
+        // 只改动第二组的一张图片。
+        GrayImage::from_pixel(32, 32, Luma([10]))
+            .save(&volatile_right)
+            .unwrap();
+
+        let statuses = resolve_group_similarity_statuses(build_snapshot()).unwrap();
+        let first = statuses
+            .iter()
+            .find(|status| status.group_index == 1)
+            .unwrap();
+        let second = statuses
+            .iter()
+            .find(|status| status.group_index == 2)
+            .unwrap();
+
+        assert_eq!(first.status, "completed", "未被改动的分组不应退回 pending");
+        assert_eq!(second.status, "pending", "被改动的分组必须退回 pending");
+    }
+
+    #[test]
     fn persisted_group_similarity_ignores_member_order() {
         let repo = create_test_repo();
         let images = vec![
@@ -4261,7 +4501,7 @@ mod tests {
             3,
             2,
         );
-        let mut cache = HashMap::new();
+        let mut cache = SimilarityImageCache::default();
         let first = Arc::new(CachedSimilarityImage {
             gray: GrayImage::from_pixel(3, 2, Luma([10])),
         });
@@ -4269,12 +4509,91 @@ mod tests {
             gray: GrayImage::from_pixel(3, 2, Luma([20])),
         });
 
-        insert_similarity_image_cache_entry(&mut cache, first_key.clone(), first, 10);
-        insert_similarity_image_cache_entry(&mut cache, second_key.clone(), second, 10);
+        cache.insert(first_key.clone(), first, 10);
+        cache.insert(second_key.clone(), second, 10);
 
         assert!(!cache.contains_key(&first_key));
         assert!(cache.contains_key(&second_key));
-        assert!(similarity_image_cache_bytes(&cache) <= 10);
+        assert!(cache.total_bytes() <= 10);
+    }
+
+    #[test]
+    fn similarity_image_cache_evicts_the_least_recently_used_entry() {
+        // 组间不整体清理缓存，因此淘汰必须保护刚被读过的条目。
+        let keys = (1..=3)
+            .map(|index| {
+                similarity_image_cache_key(
+                    "run-1",
+                    &image_summary_for_plan(
+                        index,
+                        &format!("{index}.png"),
+                        3,
+                        2,
+                        6,
+                        &format!("000000000000000{index}"),
+                    ),
+                    3,
+                    2,
+                )
+            })
+            .collect::<Vec<_>>();
+        let entry = || {
+            Arc::new(CachedSimilarityImage {
+                gray: GrayImage::from_pixel(3, 2, Luma([10])),
+            })
+        };
+
+        // 预算恰好装得下两条 6 字节条目。
+        let mut cache = SimilarityImageCache::default();
+        cache.insert(keys[0].clone(), entry(), 12);
+        cache.insert(keys[1].clone(), entry(), 12);
+        // 重新读取第一条，使第二条成为最久未用。
+        assert!(cache.get(&keys[0]).is_some());
+        cache.insert(keys[2].clone(), entry(), 12);
+
+        assert!(cache.contains_key(&keys[0]), "刚读过的条目不应被淘汰");
+        assert!(!cache.contains_key(&keys[1]), "最久未用的条目应被淘汰");
+        assert!(cache.contains_key(&keys[2]));
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn similarity_image_cache_tracks_bytes_across_eviction_and_run_cleanup() {
+        // 增量字节计数必须与实际驻留内容保持一致，否则淘汰会提前或永不触发。
+        let make_key = |run_id: &str, index: i64| {
+            similarity_image_cache_key(
+                run_id,
+                &image_summary_for_plan(
+                    index,
+                    &format!("{index}.png"),
+                    3,
+                    2,
+                    6,
+                    &format!("000000000000000{index}"),
+                ),
+                3,
+                2,
+            )
+        };
+        let entry = || {
+            Arc::new(CachedSimilarityImage {
+                gray: GrayImage::from_pixel(3, 2, Luma([10])),
+            })
+        };
+
+        let mut cache = SimilarityImageCache::default();
+        cache.insert(make_key("run-1", 1), entry(), 1024);
+        cache.insert(make_key("run-2", 2), entry(), 1024);
+        assert_eq!(cache.total_bytes(), 12);
+
+        // 重复插入同一键不应重复累计字节。
+        cache.insert(make_key("run-1", 1), entry(), 1024);
+        assert_eq!(cache.total_bytes(), 12);
+        assert_eq!(cache.len(), 2);
+
+        cache.retain_runs(|key| key.run_id != "run-1");
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_bytes(), 6);
     }
 
     #[test]
@@ -4331,6 +4650,61 @@ mod tests {
 
         assert!(jobs
             .iter()
-            .all(|job| { job.target_width == 1600 && job.target_height == 1200 }));
+            .flat_map(|job| job.targets.iter())
+            .all(|target| *target == (1600, 1200)));
+    }
+
+    #[test]
+    fn group_similarity_caps_pairs_where_both_images_are_large() {
+        // 两张同为大图时正式任务按最大边长封顶，不再按原生分辨率比对。
+        let images = vec![
+            image_summary_for_plan(1, "a.png", 4000, 3000, 4_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "b.png", 4000, 3000, 3_900_000, "0000000000000002"),
+        ];
+        let plan = vec![GroupSimilarityPlanPair {
+            left_index: 0,
+            right_index: 1,
+        }];
+
+        let jobs = build_group_similarity_image_cache_jobs("run-1", &images, &plan);
+
+        assert!(jobs
+            .iter()
+            .flat_map(|job| job.targets.iter())
+            .all(|target| *target == (1600, 1200)));
+    }
+
+    #[test]
+    fn image_cache_jobs_decode_each_source_image_only_once() {
+        // 锚图与多个不同分辨率候选配对时会得到多个目标尺寸，必须合并到同一个解码任务下。
+        let images = vec![
+            image_summary_for_plan(1, "anchor.png", 1600, 1200, 4_000_000, "0000000000000001"),
+            image_summary_for_plan(2, "small-a.png", 800, 600, 900_000, "0000000000000002"),
+            image_summary_for_plan(3, "small-b.png", 400, 300, 400_000, "0000000000000003"),
+        ];
+        let plan = vec![
+            GroupSimilarityPlanPair {
+                left_index: 0,
+                right_index: 1,
+            },
+            GroupSimilarityPlanPair {
+                left_index: 0,
+                right_index: 2,
+            },
+        ];
+
+        let jobs = build_group_similarity_image_cache_jobs("run-1", &images, &plan);
+
+        let anchor_jobs = jobs
+            .iter()
+            .filter(|job| job.image_index == 0)
+            .collect::<Vec<_>>();
+        assert_eq!(anchor_jobs.len(), 1, "锚图必须只出现在一个解码任务里");
+        assert_eq!(anchor_jobs[0].targets, vec![(800, 600), (400, 300)]);
+
+        let mut image_indices = jobs.iter().map(|job| job.image_index).collect::<Vec<_>>();
+        image_indices.sort_unstable();
+        image_indices.dedup();
+        assert_eq!(image_indices.len(), jobs.len(), "每张图片只应有一个解码任务");
     }
 }

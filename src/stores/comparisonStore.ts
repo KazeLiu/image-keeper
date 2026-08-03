@@ -101,6 +101,7 @@ export const useComparisonStore = defineStore('comparison', () => {
   let groupingRefreshGeneration = 0
   const bufferedProgress = new Map<string, MultiCompareProgressEvent>()
   const bufferedCompletions = new Set<string>()
+  const groupSimilarityStatusRequests = new Map<string, Promise<void>>()
 
   // 计算属性：进度百分比
   const progressPercentage = computed(() => {
@@ -488,6 +489,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     groupingDataRevision.value = 0
     groupEditMode.value = false
     groupSimilarityStatuses.value = {}
+    groupSimilarityStatusRequests.clear()
     clearGroupingRefreshTimer()
   }
 
@@ -610,23 +612,35 @@ export const useComparisonStore = defineStore('comparison', () => {
       return
     }
 
-    try {
-      await ensureGroupSimilarityStatusListener()
-      const statuses = await getGroupSimilarityStatuses(runId, distance)
-      if (runId !== currentRunId.value || distance !== appliedGroupingDistance.value) return
+    // 同一个 (run, 宽松度) 已有在途请求时直接复用，避免重复触发后端的整批指纹扫描。
+    const requestKey = `${runId}:${distance}`
+    const inFlightRequest = groupSimilarityStatusRequests.get(requestKey)
+    if (inFlightRequest) return inFlightRequest
 
-      const nextStatuses: Record<string, GroupSimilarityStatus> = {}
-      for (const status of statuses) {
-        const key = groupSimilarityStatusKey(status.image_ids)
-        const currentStatus = groupSimilarityStatuses.value[key]
-        nextStatuses[key] = currentStatus?.status === 'running' && status.status === 'pending'
-          ? currentStatus
-          : status
+    const request = (async () => {
+      try {
+        await ensureGroupSimilarityStatusListener()
+        const statuses = await getGroupSimilarityStatuses(runId, distance)
+        if (runId !== currentRunId.value || distance !== appliedGroupingDistance.value) return
+
+        const nextStatuses: Record<string, GroupSimilarityStatus> = {}
+        for (const status of statuses) {
+          const key = groupSimilarityStatusKey(status.image_ids)
+          const currentStatus = groupSimilarityStatuses.value[key]
+          nextStatuses[key] = currentStatus?.status === 'running' && status.status === 'pending'
+            ? currentStatus
+            : status
+        }
+        groupSimilarityStatuses.value = nextStatuses
+      } catch (error) {
+        console.warn('刷新分组 SSIM 状态失败:', error)
+      } finally {
+        groupSimilarityStatusRequests.delete(requestKey)
       }
-      groupSimilarityStatuses.value = nextStatuses
-    } catch (error) {
-      console.warn('刷新分组 SSIM 状态失败:', error)
-    }
+    })()
+
+    groupSimilarityStatusRequests.set(requestKey, request)
+    return request
   }
 
   function getGroupSimilarityStatus(group: ComparisonGroup): GroupSimilarityStatus {
