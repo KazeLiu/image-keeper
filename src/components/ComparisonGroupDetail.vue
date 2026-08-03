@@ -503,8 +503,7 @@ import {
   formatSsim,
   ORIGINAL_RECOGNITION_THRESHOLD_KEY,
   precisionSliderValueToThreshold,
-  precisionThresholdToSliderValue,
-  readStoredRecognitionThreshold
+  precisionThresholdToSliderValue
 } from '@/features/similarity'
 import { getAutomaticOriginalImageIds } from '@/features/groupThumbnails'
 
@@ -533,7 +532,12 @@ const viewerIndex = ref(0)
 const viewerZoom = ref(1)
 const thresholdPopoverVisible = ref(false)
 const isRecycling = ref(false)
-const originalRecognitionThreshold = ref(readStoredRecognitionThreshold(window.localStorage))
+const originalRecognitionThreshold = computed({
+  get: () => store.originalRecognitionThreshold,
+  set: (value: number) => {
+    store.originalRecognitionThreshold = value
+  }
+})
 const manualOriginalIds = ref<number[]>([])
 const manualThumbnailIds = ref<number[]>([])
 const showEmptyOriginalRows = ref(false)

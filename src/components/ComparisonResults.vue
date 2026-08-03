@@ -196,14 +196,12 @@ import { Refresh } from '@element-plus/icons-vue'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { useComparisonStore } from '@/stores/comparisonStore'
 import { groupHasThumbnailCandidates } from '@/features/groupThumbnails'
-import { readStoredRecognitionThreshold } from '@/features/similarity'
 import type { ComparisonGroup, ComparisonGroupMember } from '@/types'
 
 const store = useComparisonStore()
 const GROUP_PAGE_SIZE = 100
 const currentPage = ref(1)
 const showOnlyThumbnailGroups = ref(false)
-const originalRecognitionThreshold = readStoredRecognitionThreshold(window.localStorage)
 
 type GroupThumbnailStateValue = 'pending' | 'running' | 'has' | 'empty'
 
@@ -286,7 +284,7 @@ function resolveGroupThumbnailState(group: ComparisonGroup): GroupThumbnailState
   if (similarityStatus.status !== 'completed') {
     return { value: 'pending', label: '待 SSIM', tagType: 'info' }
   }
-  return groupHasThumbnailCandidates(group, originalRecognitionThreshold)
+  return groupHasThumbnailCandidates(group, store.originalRecognitionThreshold)
     ? { value: 'has', label: '有缩略图', tagType: 'success' }
     : { value: 'empty', label: '无缩略图', tagType: 'info' }
 }

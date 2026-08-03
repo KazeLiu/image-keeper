@@ -25,6 +25,7 @@ import type {
   ComparisonRunHistoryItem
 } from '@/types'
 import { RunStatus } from '@/types'
+import { readStoredRecognitionThreshold } from '@/features/similarity'
 
 /** 多目录选择模型 */
 interface DirectoryRow {
@@ -87,6 +88,7 @@ export const useComparisonStore = defineStore('comparison', () => {
   const isRefreshingGroups = ref(false)
   const groupingDataRevision = ref(0)
   const groupEditMode = ref(false)
+  const originalRecognitionThreshold = ref(readStoredRecognitionThreshold(window.localStorage))
   const groupSimilarityStatuses = ref<Record<string, GroupSimilarityStatus>>({})
 
   let unlistenProgress: UnlistenFn | null = null
@@ -1028,6 +1030,7 @@ export const useComparisonStore = defineStore('comparison', () => {
     isRefreshingGroups,
     groupingDataRevision,
     groupEditMode,
+    originalRecognitionThreshold,
     groupSimilarityStatuses,
 
     // 计算属性

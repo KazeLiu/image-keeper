@@ -30,6 +30,7 @@ const store = reactive({
   appliedGroupingDistance: 10,
   isRefreshingGroups: false,
   groupingDataRevision: 0,
+  originalRecognitionThreshold: 0.985,
   selectGroupMember: vi.fn(),
   markGroupSimilarityStatus: vi.fn(),
   refreshAnalysisData: vi.fn(async () => undefined)
@@ -98,6 +99,7 @@ describe('ComparisonGroupDetail threshold semantics', () => {
     store.appliedGroupingDistance = 10
     store.isRefreshingGroups = false
     store.groupingDataRevision = 0
+    store.originalRecognitionThreshold = 0.985
     window.localStorage.setItem('imagekeeper:original-recognition-ssim', '0.985')
   })
 
