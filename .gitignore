@@ -40,3 +40,7 @@ Cargo.lock
 src-tauri/target/
 src-tauri/WixTools/
 src-tauri/build_warnings.txt
+
+# 打包产物与调试临时文件
+outputs/
+work/

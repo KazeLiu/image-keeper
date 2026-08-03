@@ -235,7 +235,11 @@ aspectDiff = abs(aspectA - aspectX) / max(aspectA, aspectX)
 6. 缩放方向、目标尺寸、重采样算法和边界处理。
 7. 结构相似性的窗口大小、通道策略和常量参数。
 
-对于尺寸不同且宽高比可比的图片，统一到像素数较少图片的完整宽高；平局时按宽、高稳定选择目标尺寸。较大图片使用 Lanczos3 缩小，不设置 512px 上限，也不放大较小图片。
+对于尺寸不同且宽高比可比的图片，统一到像素数较少图片的完整宽高；平局时按宽、高稳定选择目标尺寸。较大图片使用 Lanczos3 缩小，不放大较小图片。
+
+正式任务（扫描评分与分组复核）在此基础上再按最大边长 `1600` 封顶：两张图片同为高分辨率时，归一化尺寸不会超过 1600px 长边。这一层封顶只作用于正式任务；SSIM 指标测试台与找差分图小工具保留不封顶的原始口径，便于人工核对全分辨率下的真实数值。
+
+降采样是低通滤波，会抹掉 JPEG 伪影、噪点与锐化差异这类高频信息，使 SSIM 分数系统性升高。因此最大边长属于归一化口径的一部分，调整它必须同步升级算法配置 ID，历史结果不得与新结果混用。
 
 当前标准 SSIM 固定使用灰度通道、11×11 高斯窗口、`sigma=1.5`、镜像边界，以及由 8 位动态范围推导的 `C1=6.5025`、`C2=58.5225`。主流程、组内比较、找差分图和指标工具必须调用同一核心入口。
 
@@ -401,12 +405,13 @@ JSON 是完整、可机器读取的主报告。示例：
   "runId": "20260713-170000-ab12cd",
   "applicationVersion": "0.1.0",
   "algorithmProfile": {
-    "id": "imagekeeper-v3-standard-ssim-fullres",
+    "id": "imagekeeper-v4-standard-ssim-capped",
     "hash": "blake3",
     "perceptualHashMaxDistance": 10,
     "compressedSsimThreshold": 0.995,
     "normalizationVersion": 2,
-    "maxWorkers": 4
+    "ssimMaxEdge": 1600,
+    "maxWorkers": 15
   },
   "roots": {
     "baseline": "A",
@@ -437,7 +442,7 @@ JSON 是完整、可机器读取的主报告。示例：
       "ssim": 0.996,
       "sourceResolution": [1920, 1080],
       "matchResolution": [3840, 2160],
-      "algorithmProfileId": "imagekeeper-v3-standard-ssim-fullres"
+      "algorithmProfileId": "imagekeeper-v4-standard-ssim-capped"
     }
   ]
 }

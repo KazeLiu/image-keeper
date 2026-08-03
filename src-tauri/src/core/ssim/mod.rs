@@ -12,9 +12,9 @@ use std::path::Path;
 pub struct SsimEngine;
 
 impl SsimEngine {
-    /// 计算两张图片的结构相似性
+    /// 计算两张图片的结构相似性，使用正式任务的封顶归一化口径。
     pub fn compute_ssim(path1: &Path, path2: &Path) -> Result<f64> {
-        compute::SsimComputer::compute_from_files(path1, path2)
+        compute::SsimComputer::compute_task_ssim_from_files(path1, path2)
     }
 
     /// 为候选配对计算结构相似性
@@ -31,7 +31,7 @@ impl SsimEngine {
             pairs
                 .par_iter()
                 .map(|(_, left_path, right_path)| {
-                    compute::SsimComputer::compute_from_files(
+                    compute::SsimComputer::compute_task_ssim_from_files(
                         Path::new(left_path),
                         Path::new(right_path),
                     )
